@@ -1,8 +1,10 @@
+import "mapbox-gl/dist/mapbox-gl.css";
 import gsap from "gsap";
 import { ORBIT_LAT, createCamera, orbitLayout, setInteractive } from "./camera";
-import { MAPBOX_TOKEN, fetchWorldHotspots, prefersReducedMotion } from "./geo";
-import { addCountryLayers, addHotspotLayers, setHotspots, startPulse } from "./layers";
-import { flyToCountry, returnToOrbit } from "./flights";
+import { MAPBOX_TOKEN, prefersReducedMotion } from "./geo";
+import { addHotspotLayers, setHotspots, startPulse } from "./layers";
+import { PREVIEW_POINTS } from "./previewPoints";
+import { flyToCountry, returnToOrbit, setViewMode } from "./flights";
 
 const START_LNG = 62;
 const SPIN_DEGREES_PER_MS = 0.005;
@@ -16,6 +18,10 @@ const FOG = {
 
 // Builds the Mapbox globe and returns a small controller. Modes: boot -> intro -> orbit <-> flight/country.
 export function createGlobe({ mapboxgl, container, slot, onFeed }) {
+  // Phones and tablets get cheaper rendering: no antialiasing and ~30 fps for the idle animation.
+  const compact = window.matchMedia("(max-width: 1000px), (pointer: coarse)").matches;
+  const minFrameMs = compact ? 33 : 0;
+
   const map = new mapboxgl.Map({
     container,
     accessToken: MAPBOX_TOKEN,
@@ -24,13 +30,14 @@ export function createGlobe({ mapboxgl, container, slot, onFeed }) {
     center: [START_LNG, ORBIT_LAT],
     zoom: 0.5,
     maxZoom: 9,
-    antialias: true,
+    maxPitch: 72,
+    antialias: !compact,
     fadeDuration: 0,
   });
   setInteractive(map, false);
 
   const camera = createCamera(map);
-  let disposed = false;
+  let visible = true;
   let markReady;
   const stage = {
     map,
@@ -38,15 +45,20 @@ export function createGlobe({ mapboxgl, container, slot, onFeed }) {
     container,
     slot,
     mode: "boot",
-    worldPoints: [],
+    viewMode: "3d",
     pulse: null,
     highlight: null,
     ready: new Promise((resolve) => (markReady = resolve)),
   };
 
+  // Idle spin: skipped when the tab or the hero is off screen, and capped on compact devices.
+  let pending = 0;
   const spin = (_time, delta) => {
-    if (stage.mode !== "orbit" || document.hidden) return;
-    camera.state.lng -= delta * SPIN_DEGREES_PER_MS;
+    if (stage.mode !== "orbit" || document.hidden || !visible) return;
+    pending += delta;
+    if (pending < minFrameMs) return;
+    camera.state.lng -= pending * SPIN_DEGREES_PER_MS;
+    pending = 0;
     if (camera.state.lng < -180) camera.state.lng += 360;
     camera.apply();
   };
@@ -79,25 +91,12 @@ export function createGlobe({ mapboxgl, container, slot, onFeed }) {
     });
   }
 
-  async function loadWorld() {
-    try {
-      const data = await fetchWorldHotspots();
-      if (disposed) return;
-      stage.worldPoints = data.points;
-      if (stage.mode === "intro" || stage.mode === "orbit") setHotspots(map, data.points);
-      onFeed({ status: "ready", total: data.total, shown: data.points.length });
-    } catch {
-      if (!disposed) onFeed({ status: "error" });
-    }
-  }
-
   map.on("load", () => {
     map.setFog(FOG);
-    addCountryLayers(map);
     addHotspotLayers(map);
-    stage.pulse = startPulse(map);
+    setHotspots(map, PREVIEW_POINTS);
+    stage.pulse = startPulse(map, minFrameMs || 40);
     startIntro();
-    loadWorld();
   });
 
   map.on("error", (event) => {
@@ -110,19 +109,31 @@ export function createGlobe({ mapboxgl, container, slot, onFeed }) {
 
   if (!prefersReducedMotion()) gsap.ticker.add(spin);
   window.addEventListener("resize", relayout);
-  const observer = new ResizeObserver(relayout);
-  observer.observe(slot);
+  const resizeObserver = new ResizeObserver(relayout);
+  resizeObserver.observe(slot);
+
+  const visibilityObserver = new IntersectionObserver(([entry]) => {
+    visible = entry.isIntersecting;
+    if (!stage.pulse) return;
+    if (visible) stage.pulse.play();
+    else stage.pulse.pause();
+  });
+  visibilityObserver.observe(container);
 
   return {
     fly: (options) => flyToCountry(stage, options),
     back: () => returnToOrbit(stage),
+    setView: (mode) => setViewMode(stage, mode),
+    updateHotspots(points) {
+      if (stage.mode === "country") setHotspots(map, points);
+    },
     destroy() {
-      disposed = true;
       markReady(false);
       gsap.ticker.remove(spin);
       gsap.killTweensOf(camera.state);
       window.removeEventListener("resize", relayout);
-      observer.disconnect();
+      resizeObserver.disconnect();
+      visibilityObserver.disconnect();
       stage.pulse?.pause();
       stage.highlight?.pause();
       document.documentElement.classList.remove("globe-locked");

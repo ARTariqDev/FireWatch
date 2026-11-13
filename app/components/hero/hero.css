@@ -38,6 +38,7 @@
   width: 108%;
   height: 92%;
   color: rgb(231 94 52 / 26%);
+  will-change: transform;
 }
 
 .hero-contours path {

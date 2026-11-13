@@ -1,5 +1,5 @@
 .country-hud {
-  position: absolute;
+  position: fixed;
   top: 50%;
   left: max(28px, calc((100% - 1440px) / 2 + 56px));
   z-index: 4;
@@ -135,6 +135,14 @@
   font-size: 11px;
 }
 
+.hud-updated {
+  margin: 14px 0 0;
+  color: #6f675d;
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 8px;
+  letter-spacing: 0.1em;
+}
+
 .hud-back {
   display: inline-flex;
   align-items: center;
@@ -178,7 +186,88 @@
   }
 }
 
+.view-switch {
+  position: fixed;
+  top: 96px;
+  right: max(28px, calc((100% - 1440px) / 2 + 56px));
+  z-index: 4;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  padding: 3px;
+  border: 1px solid rgb(231 215 194 / 18%);
+  background: rgb(14 13 12 / 90%);
+  box-shadow: 0 14px 40px rgb(0 0 0 / 40%);
+  opacity: 0;
+  transform: translateY(-8px);
+  visibility: hidden;
+  transition:
+    opacity 300ms ease,
+    transform 300ms ease,
+    visibility 0s linear 300ms;
+}
+
+.view-switch[data-visible="true"] {
+  opacity: 1;
+  transform: none;
+  visibility: visible;
+  transition:
+    opacity 500ms ease 1.2s,
+    transform 500ms ease 1.2s,
+    visibility 0s;
+}
+
+/* The sliding thumb sits behind whichever option is active. */
+.view-switch::before {
+  position: absolute;
+  inset: 3px auto 3px 3px;
+  width: calc(50% - 3px);
+  background: #ff6a32;
+  content: "";
+  transition: transform 350ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.view-switch[data-mode="2d"]::before {
+  transform: translateX(100%);
+}
+
+.view-switch-option {
+  position: relative;
+  min-width: 52px;
+  padding: 9px 14px;
+  border: 0;
+  background: none;
+  color: #a39a8f;
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  cursor: pointer;
+  transition: color 250ms ease;
+}
+
+.view-switch-option[aria-pressed="true"] {
+  color: #150b06;
+  font-weight: 700;
+}
+
+.view-switch-option:hover:not(:disabled):not([aria-pressed="true"]) {
+  color: #ff9a68;
+}
+
+.view-switch-option:disabled {
+  cursor: wait;
+}
+
+.view-switch-option:focus-visible {
+  outline: 2px solid #ff9860;
+  outline-offset: 2px;
+}
+
 @media (max-width: 1000px) {
+  .view-switch {
+    top: 84px;
+    right: 20px;
+  }
+
   .country-hud {
     top: auto;
     bottom: 62px;
@@ -194,5 +283,53 @@
 
   .hud-stat-value {
     font-size: 22px;
+  }
+}
+
+/* Phones: a compact card (one row of stats) so the map keeps most of the screen. */
+@media (max-width: 600px) {
+  .country-hud {
+    padding: 14px 14px 10px;
+  }
+
+  .hud-eyebrow {
+    margin-bottom: 8px;
+  }
+
+  .hud-title {
+    margin-bottom: 12px;
+    font-size: 30px;
+  }
+
+  .hud-sub,
+  .hud-legend,
+  .hud-context {
+    display: none;
+  }
+
+  .hud-stats {
+    grid-template-columns: repeat(4, 1fr);
+  }
+
+  .hud-stat {
+    min-height: 56px;
+    padding: 8px;
+  }
+
+  .hud-stat-value {
+    font-size: 18px;
+  }
+
+  .hud-stat-label {
+    font-size: 6.5px;
+    letter-spacing: 0.06em;
+  }
+
+  .hud-updated {
+    margin-top: 10px;
+  }
+
+  .hud-back {
+    margin-top: 10px;
   }
 }

@@ -43,7 +43,9 @@ export function setHotspots(map, points) {
   map.setFilter(PULSE_LAYER, pulseFilter(points));
 }
 
-export function addCountryLayers(map) {
+// Added on first use so the landing page never downloads country boundaries it doesn't show.
+export function ensureCountryLayers(map) {
+  if (map.getSource(COUNTRY_SOURCE)) return;
   const labelLayer = map.getStyle().layers.find((layer) => layer.type === "symbol")?.id;
   map.addSource(COUNTRY_SOURCE, { type: "vector", url: "mapbox://mapbox.country-boundaries-v1" });
   map.addLayer(
@@ -114,15 +116,19 @@ export function addHotspotLayers(map) {
 }
 
 // Anime.js drives a looping sonar ring on the brightest in-country detections.
-export function startPulse(map) {
+// Paint updates are capped to `minFrameMs` because every one of them re-renders the map.
+export function startPulse(map, minFrameMs = 0) {
   const ring = { t: 0 };
+  let lastPaint = 0;
   return animate(ring, {
     t: 1,
     duration: 2400,
     ease: "outQuad",
     loop: true,
     onUpdate: () => {
-      if (!map.getLayer(PULSE_LAYER)) return;
+      const now = performance.now();
+      if (now - lastPaint < minFrameMs || !map.getLayer(PULSE_LAYER)) return;
+      lastPaint = now;
       map.setPaintProperty(PULSE_LAYER, "circle-radius", 3 + ring.t * 17);
       map.setPaintProperty(PULSE_LAYER, "circle-stroke-opacity", 0.85 * (1 - ring.t));
     },

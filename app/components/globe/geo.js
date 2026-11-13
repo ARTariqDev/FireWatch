@@ -52,13 +52,7 @@ export async function fetchCountryHotspots(iso3) {
   return response.json();
 }
 
-export async function fetchWorldHotspots() {
-  const response = await fetch("/api/hotspots");
-  if (!response.ok) throw new Error(`Hotspot request failed (${response.status})`);
-  return response.json();
-}
-
-// Interpolates longitude along the shortest arc so the globe never spins the long way round.
+// Interpolates along the shortest arc so the camera never spins the long way round.
 export const shortestLng = (from, to) => from + ((((to - from) % 360) + 540) % 360) - 180;
 
 export const prefersReducedMotion = () =>

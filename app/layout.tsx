@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { preconnect } from "react-dom";
 import { Geist, Geist_Mono, Instrument_Serif } from "next/font/google";
 import "./globals.css";
 
@@ -26,6 +27,9 @@ export const metadata: Metadata = {
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
+  // The map's style, tiles and fonts all come from here; opening the connection early hides its setup time.
+  preconnect("https://api.mapbox.com", { crossOrigin: "anonymous" });
+
   return (
     <html
       lang="en"

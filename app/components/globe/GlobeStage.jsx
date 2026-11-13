@@ -1,48 +1,76 @@
 "use client";
 
-import "mapbox-gl/dist/mapbox-gl.css";
 import "./globe.css";
-import { useEffect, useImperativeHandle, useRef } from "react";
-import { createGlobe } from "./createGlobe";
+import { useEffect, useImperativeHandle, useRef, useState } from "react";
 import { hasMapboxToken } from "./geo";
+
+// Runs `task` once the browser is idle (or soon after), so the hero text paints before the heavy map code loads.
+function whenIdle(task) {
+  if ("requestIdleCallback" in window) {
+    const id = window.requestIdleCallback(task, { timeout: 1500 });
+    return () => window.cancelIdleCallback(id);
+  }
+  const id = window.setTimeout(task, 400);
+  return () => window.clearTimeout(id);
+}
 
 // Full-hero Mapbox globe. `slotRef` marks where the globe rests while in orbit.
 function GlobeStage({ ref, slotRef, onFeed }) {
   const containerRef = useRef(null);
   const globeRef = useRef(null);
 
+  // Resolves to the controller once the globe exists, or null if it never will (e.g. no token).
+  const [created] = useState(() => {
+    let settle;
+    const promise = new Promise((resolve) => (settle = resolve));
+    return { promise, settle };
+  });
+
   useEffect(() => {
     if (!hasMapboxToken()) {
       onFeed({ status: "no-token" });
+      created.settle(null);
       return;
     }
 
     let cancelled = false;
-    // Loaded on demand: Mapbox GL needs the browser and is heavy for the first paint.
-    import("mapbox-gl").then(({ default: mapboxgl }) => {
-      if (cancelled) return;
-      globeRef.current = createGlobe({
-        mapboxgl,
-        container: containerRef.current,
-        slot: slotRef.current,
-        onFeed,
-      });
+    const cancelIdle = whenIdle(() => {
+      // Mapbox GL and its CSS are heavy and browser-only, so they load as one lazy chunk.
+      import("./createGlobe")
+        .then(async ({ createGlobe }) => {
+          const { default: mapboxgl } = await import("mapbox-gl");
+          if (cancelled) return;
+          globeRef.current = createGlobe({
+            mapboxgl,
+            container: containerRef.current,
+            slot: slotRef.current,
+            onFeed,
+          });
+          created.settle(globeRef.current);
+        })
+        .catch(() => {
+          onFeed({ status: "map-error" });
+          created.settle(null);
+        });
     });
 
     return () => {
       cancelled = true;
+      cancelIdle();
       globeRef.current?.destroy();
       globeRef.current = null;
     };
-  }, [slotRef, onFeed]);
+  }, [slotRef, onFeed, created]);
 
   useImperativeHandle(
     ref,
     () => ({
-      flyToCountry: (options) => globeRef.current?.fly(options) ?? Promise.resolve(false),
-      returnToOrbit: () => globeRef.current?.back() ?? Promise.resolve(false),
+      flyToCountry: async (options) => (await created.promise)?.fly(options) ?? false,
+      returnToOrbit: async () => (await created.promise)?.back() ?? false,
+      setViewMode: async (mode) => (await created.promise)?.setView(mode) ?? false,
+      updateHotspots: (points) => globeRef.current?.updateHotspots(points),
     }),
-    [],
+    [created],
   );
 
   return (
@@ -50,7 +78,7 @@ function GlobeStage({ ref, slotRef, onFeed }) {
       ref={containerRef}
       className="globe-stage"
       role="region"
-      aria-label="Globe showing recent satellite fire detections"
+      aria-label="Globe with illustrative fire signals. Choose View Hotspots to load live satellite detections."
     />
   );
 }

@@ -1,10 +1,12 @@
+import { applyTerrain } from "./terrain";
+
 const TILE_SIZE = 512;
 export const ORBIT_LAT = 16;
 
-const clampPad = (value) => Math.max(0, Math.round(value));
-
 // Measured: Mapbox's rendered globe is ~14% wider than the worldSize / π geometry predicts.
 const RENDERED_GLOBE_RATIO = 1.14;
+
+const clampPad = (value) => Math.max(0, Math.round(value));
 
 // Globe diameter in px -> Mapbox zoom (globe radius is worldSize / 2π).
 export const zoomForDiameter = (diameter) =>
@@ -34,21 +36,61 @@ export function orbitLayout(container, slot) {
 
 export const NO_PADDING = { padL: 0, padR: 0, padT: 0, padB: 0 };
 
-// A plain object GSAP can tween; `apply` pushes it to the map.
+// A plain object GSAP can tween; `apply` pushes it to the map. Terrain is quantised so it updates in steps.
 export function createCamera(map) {
-  const state = { lng: 0, lat: ORBIT_LAT, zoom: 1, ...NO_PADDING };
-  const apply = () =>
+  const state = {
+    lng: 0,
+    lat: ORBIT_LAT,
+    zoom: 1,
+    pitch: 0,
+    bearing: 0,
+    terrain: 0,
+    ...NO_PADDING,
+  };
+  let appliedTerrain = 0;
+
+  const apply = () => {
+    const terrain = Math.round(state.terrain * 20) / 20;
+    if (terrain !== appliedTerrain) {
+      appliedTerrain = terrain;
+      applyTerrain(map, terrain);
+    }
     map.jumpTo({
       center: [state.lng, state.lat],
       zoom: state.zoom,
+      pitch: state.pitch,
+      bearing: state.bearing,
       padding: { left: state.padL, right: state.padR, top: state.padT, bottom: state.padB },
     });
+  };
   return { state, apply };
 }
 
-export function setInteractive(map, enabled) {
+// Copies the live camera into the tweenable state, e.g. after the visitor has panned.
+export function syncCamera(map, state) {
+  const center = map.getCenter();
+  Object.assign(state, {
+    lng: center.lng,
+    lat: center.lat,
+    zoom: map.getZoom(),
+    pitch: map.getPitch(),
+    bearing: map.getBearing(),
+    ...NO_PADDING,
+  });
+}
+
+// Tilt and rotation are only offered in the 3D view; the 2D view stays locked north-up.
+export function setInteractive(map, enabled, tilt = false) {
   const handlers = [map.dragPan, map.scrollZoom, map.doubleClickZoom, map.touchZoomRotate, map.keyboard];
   handlers.forEach((handler) => (enabled ? handler.enable() : handler.disable()));
-  map.dragRotate.disable();
-  map.touchZoomRotate.disableRotation();
+
+  if (enabled && tilt) {
+    map.dragRotate.enable();
+    map.touchPitch.enable();
+    map.touchZoomRotate.enableRotation();
+  } else {
+    map.dragRotate.disable();
+    map.touchPitch.disable();
+    map.touchZoomRotate.disableRotation();
+  }
 }

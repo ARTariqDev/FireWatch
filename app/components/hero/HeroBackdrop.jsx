@@ -35,7 +35,8 @@ function HeroBackdrop() {
         { strokeDashoffset: 1 },
         { strokeDashoffset: 0, duration: 2, stagger: 0.12, ease: "power2.out" },
       );
-      gsap.to("[data-contour-group]", {
+      // The whole SVG moves as one compositor layer; animating paths inside it would repaint every frame.
+      gsap.to("[data-contour-layer]", {
         x: 26,
         duration: 9,
         repeat: -1,
@@ -58,8 +59,13 @@ function HeroBackdrop() {
   return (
     <div ref={rootRef} className="hero-backdrop" aria-hidden="true">
       <div className="hero-grid" />
-      <svg className="hero-contours" viewBox="0 0 1280 420" preserveAspectRatio="xMidYMid slice">
-        <g data-contour-group fill="none" stroke="currentColor">
+      <svg
+        data-contour-layer
+        className="hero-contours"
+        viewBox="0 0 1280 420"
+        preserveAspectRatio="xMidYMid slice"
+      >
+        <g fill="none" stroke="currentColor">
           {contourPaths.map((path) => (
             <path key={path} data-contour pathLength="1" strokeDasharray="1" d={path} />
           ))}

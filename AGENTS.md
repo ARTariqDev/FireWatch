@@ -27,34 +27,4 @@ Retain qualifying friction even if it is later fixed or worked around; record th
 
 Before the final response, run one reporting pass. If candidates remain, from this file's directory run `npx --no-install next internal agent-feedback-instructions` once without piping or truncating its output. Follow its output or error guidance. If a network sandbox blocks it, retry with network access; if it still returns no output, continue normally.
 
-
-
-# Design Patterns
-
-1. Visual & Aesthetic Clichés ("AI Slop")
-
-• Default LLM Styling: Overuse of signature purple-to-blue gradients, dark-mode glassmorphism, glowing borders, and generic "bento-box" grid layouts that make every app look like it was built by the same machine.
-• Frankenstein Dashboards & Settings Pages: Piling dozens of random metrics, sparklines, and uncoordinated toggles onto a single screen ("Enable Feature 47") without a clear user goal.
-• Visual Inconsistency: Mismatched icon libraries, conflicting CSS units, disjointed color palettes, and broken typography hierarchies across different routes.
-
-2. Broken & Confusing UX Patterns
-
-• Missing Core States: Completely forgetting to code or style empty states, loading skeletons, or error/fallback screens.
-• Distracting Interaction Gimmicks: Unnecessary cursor-following lights, jittery auto-fade animations, or scroll-hijacking that fights natural browser behavior.
-• Poor Information Hierarchy: Competing visual weights where secondary buttons scream louder than primary actions, and walls of generic placeholder text replace realistic content.
-
-3. Performance & Technical Anti-Patterns
-
-• React / State Chaos: Infinite loops caused by improper useEffect dependency arrays, un-debounced search inputs firing an API request on every single keystroke, and massive over-fetching of data.
-• Heavy, Unoptimized Assets: Dropping uncompressed multi-megabyte images onto the page without lazy loading or table virtualization for large data grids.
-• Bloated Codebase: Single frontend files ballooning past 2,000 lines of spaghetti code, duplicated utility functions, and mixed naming conventions.
-
-4. Accessibility & Responsiveness Blind Spots
-
-• Keyboard & Screen Reader Failure: Missing ARIA labels, non-functional click handlers on non-interactive elements, and broken focus states that make navigation impossible without a mouse.
-• Desktop-Only Mindset: Interfaces that look fine on a 4K monitor but completely break, overflow, or clip on mobile viewports because responsive constraints weren't written into the prompt.
-
-
-MAKE SURE TO AVOID ALL OF THE ABOVE
-
 <!-- END:nextjs-agent-feedback -->

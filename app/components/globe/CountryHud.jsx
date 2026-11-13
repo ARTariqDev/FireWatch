@@ -10,6 +10,8 @@ import { prefersReducedMotion } from "./geo";
 gsap.registerPlugin(useGSAP);
 
 const format = (value) => Math.round(value).toLocaleString("en-US");
+const formatTime = (iso) =>
+  new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
 function Stat({ label, value }) {
   return (
@@ -64,6 +66,9 @@ function HudBody({ country }) {
       {stats.context > 0 && (
         <p className="hud-context">+{format(stats.context)} dimmer detections just across the border</p>
       )}
+      <p className="hud-updated">
+        CHECKED {formatTime(stats.generatedAt)} · AUTO-REFRESH EVERY 30 MIN
+      </p>
     </>
   );
 }
