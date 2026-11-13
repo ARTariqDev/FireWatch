@@ -6,18 +6,20 @@ import gsap from "gsap";
 
 gsap.registerPlugin(useGSAP);
 
+const HOVER_SCALE = 1.035;
+
 const Button = ({
   text,
-  glowColor = "#fb923c",
   onClick,
-  color = "linear-gradient(115deg, #17110e 0%, #991b1b 52%, #f97316 100%)",
-  textColor = "#ffffff",
-  rippleColor = "rgba(255,255,255,0.3)",
+  disabled = false,
+  color = "#ff6a32",
+  textColor = "#150b06",
+  glowColor = "#ffe3d1",
+  rippleColor = "rgba(21,11,6,0.22)",
 }) => {
   const btnRef = useRef(null);
   const glowRef = useRef(null);
-  const sheenRef = useRef(null);
-  const interactionRef = useRef(null);
+  const motionRef = useRef(null);
   const isActiveRef = useRef(false);
   const nextRippleId = useRef(0);
   const [ripples, setRipples] = useState([]);
@@ -26,25 +28,11 @@ const Button = ({
     (_, contextSafe) => {
       const button = btnRef.current;
       const glow = glowRef.current;
-      const sheen = sheenRef.current;
-
-      if (!button || !glow || !sheen) return;
       if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
 
-      gsap.set(sheen, { xPercent: -160 });
-      gsap
-        .timeline({ delay: 0.12 })
-        .to(sheen, {
-          xPercent: 160,
-          opacity: 0.75,
-          duration: 0.85,
-          ease: "power2.inOut",
-        })
-        .to(sheen, { opacity: 0, duration: 0.22 }, "-=0.16");
-
-      const animateInteraction = contextSafe((active) => {
+      const settle = contextSafe((active) => {
         gsap.to(button, {
-          scale: active ? 1.035 : 1,
+          scale: active ? HOVER_SCALE : 1,
           y: active ? -2 : 0,
           duration: active ? 0.2 : 0.24,
           ease: active ? "power2.out" : "power2.inOut",
@@ -59,87 +47,70 @@ const Button = ({
         });
       });
 
-      const animateClick = contextSafe(() => {
-        const activeScale = isActiveRef.current ? 1.035 : 1;
-        const activeY = isActiveRef.current ? -2 : 0;
+      const press = contextSafe(() => {
         gsap
           .timeline({ defaults: { overwrite: "auto" } })
           .to(button, { scale: 0.96, y: 0, duration: 0.08, ease: "power1.in" })
           .to(button, {
-            scale: activeScale,
-            y: activeY,
+            scale: isActiveRef.current ? HOVER_SCALE : 1,
+            y: isActiveRef.current ? -2 : 0,
             duration: 0.38,
             ease: "back.out(2)",
           });
       });
 
-      interactionRef.current = { animateInteraction, animateClick };
+      motionRef.current = { settle, press };
       return () => {
-        interactionRef.current = null;
+        motionRef.current = null;
       };
     },
     { scope: btnRef },
   );
 
-  const handlePointerMove = (e) => {
-    if (e.pointerType !== "mouse" || !btnRef.current) return;
+  const setActive = (active) => {
+    isActiveRef.current = active && !disabled;
+    motionRef.current?.settle(isActiveRef.current);
+  };
 
+  const handlePointerMove = (e) => {
+    if (e.pointerType !== "mouse") return;
     const rect = e.currentTarget.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    btnRef.current.style.setProperty("--x", `${x}px`);
-    btnRef.current.style.setProperty("--y", `${y}px`);
+    e.currentTarget.style.setProperty("--x", `${e.clientX - rect.left}px`);
+    e.currentTarget.style.setProperty("--y", `${e.clientY - rect.top}px`);
   };
 
   const handlePointerLeave = (e) => {
     e.currentTarget.style.setProperty("--x", "50%");
     e.currentTarget.style.setProperty("--y", "50%");
-    isActiveRef.current = e.currentTarget.matches(":focus");
-    interactionRef.current?.animateInteraction(isActiveRef.current);
-  };
-
-  const handleInteractionStart = () => {
-    isActiveRef.current = true;
-    interactionRef.current?.animateInteraction(true);
-  };
-
-  const handleInteractionEnd = () => {
-    isActiveRef.current = false;
-    interactionRef.current?.animateInteraction(false);
+    setActive(e.currentTarget.matches(":focus-visible"));
   };
 
   const handleClick = (e) => {
+    if (disabled) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const isKeyboardClick = e.detail === 0;
     const x = isKeyboardClick ? rect.width / 2 : e.clientX - rect.left;
     const y = isKeyboardClick ? rect.height / 2 : e.clientY - rect.top;
-    const id = nextRippleId.current++;
-    onClick?.();
-    interactionRef.current?.animateClick();
 
-    setRipples((prev) => [...prev, { id, x, y }]);
+    onClick?.();
+    motionRef.current?.press();
+    setRipples((prev) => [...prev, { id: nextRippleId.current++, x, y }]);
   };
 
   return (
     <button
       ref={btnRef}
-      onPointerEnter={handleInteractionStart}
+      type="button"
+      disabled={disabled}
+      onPointerEnter={() => setActive(true)}
       onPointerMove={handlePointerMove}
       onPointerLeave={handlePointerLeave}
-      onFocus={handleInteractionStart}
-      onBlur={handleInteractionEnd}
+      onFocus={(e) => e.currentTarget.matches(":focus-visible") && setActive(true)}
+      onBlur={() => setActive(false)}
       onClick={handleClick}
-      className="relative isolate inline-flex min-h-12 items-center justify-center overflow-hidden rounded-xl border border-white/15 px-7 py-3 font-semibold tracking-wide shadow-[0_8px_24px_rgba(127,29,29,0.28)] transition-shadow duration-300 ease-out hover:shadow-[0_12px_30px_rgba(234,88,12,0.35)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-orange-300"
-      style={{
-        background: color,
-      }}
+      className="relative isolate inline-flex min-h-12 cursor-pointer items-center justify-center overflow-hidden rounded-lg px-7 py-3 font-semibold shadow-[0_10px_26px_rgba(255,106,50,0.2)] transition-shadow duration-300 hover:shadow-[0_12px_30px_rgba(255,106,50,0.34)] focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-orange-300 disabled:cursor-wait disabled:opacity-60 disabled:shadow-none"
+      style={{ background: color }}
     >
-      <span
-        ref={sheenRef}
-        aria-hidden="true"
-        className="pointer-events-none absolute inset-y-[-35%] left-[-35%] z-0 w-1/3 rotate-12 bg-gradient-to-r from-transparent via-white/50 to-transparent opacity-0 blur-sm"
-      />
-
       <span
         ref={glowRef}
         aria-hidden="true"
