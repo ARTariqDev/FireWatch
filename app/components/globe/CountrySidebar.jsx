@@ -1,13 +1,14 @@
 "use client";
 
 import "./hud.css";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { useGSAP } from "@gsap/react";
 import gsap from "gsap";
 import { animate, stagger } from "animejs";
 import { prefersReducedMotion } from "./geo";
 import HotspotRefresh from "./HotspotRefresh";
 import ViewModeSwitch from "./ViewModeSwitch";
+import TimelineControls from "./TimelineControls";
 
 gsap.registerPlugin(useGSAP);
 
@@ -15,9 +16,9 @@ const format = (value) => Math.round(value).toLocaleString("en-US");
 const formatTime = (iso) =>
   new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
-function Stat({ label, value }) {
+function Stat({ label, value, highlight }) {
   return (
-    <div className="hud-stat">
+    <div className={`hud-stat ${highlight ? "hud-stat-highlight" : ""}`}>
       <span className="hud-stat-value">
         <span data-count={value}>{format(value)}</span>
       </span>
@@ -26,7 +27,7 @@ function Stat({ label, value }) {
   );
 }
 
-function HudBody({ country }) {
+function HudBody({ country, timelineStats }) {
   if (country?.status === "error") {
     return (
       <p className="hud-note">
@@ -46,17 +47,33 @@ function HudBody({ country }) {
   }
 
   const { stats } = country.data;
+  const current = timelineStats || {
+    total: stats.inside,
+    active: stats.inside,
+    extinguished: 0,
+    maxFrp: stats.maxFrp,
+    modis: stats.modis,
+    viirs: stats.viirs,
+    timeLabel: "LIVE (ROLLING 24H)",
+  };
+
   return (
     <>
       <div className="hud-stats">
-        <Stat label="DETECTIONS" value={stats.inside} />
-        <Stat label="PEAK FRP · MW" value={stats.maxFrp} />
-        <Stat label="MODIS" value={stats.modis} />
-        <Stat label="VIIRS" value={stats.viirs} />
+        <Stat label="DETECTIONS" value={current.total} />
+        <Stat label="PEAK FRP · MW" value={current.maxFrp} />
+        <Stat label="ACTIVE NOW" value={current.active} />
+        <Stat label="PUT OUT" value={current.extinguished} highlight={current.extinguished > 0} />
       </div>
-      {stats.inside === 0 ? (
+      <div className="hud-secondary-metrics">
+        <span>MODIS: {format(current.modis)}</span>
+        <span className="metric-divider">/</span>
+        <span>VIIRS: {format(current.viirs)}</span>
+        <span className="metric-pill">{current.timeLabel}</span>
+      </div>
+      {current.total === 0 ? (
         <p className="hud-note">
-          No thermal anomalies in the last 24 hours — or the next satellite pass hasn&apos;t landed yet.
+          No thermal anomalies detected for this timeframe.
         </p>
       ) : (
         <div className="hud-legend" aria-hidden="true">
@@ -74,10 +91,23 @@ function HudBody({ country }) {
 
 function CountrySidebar({
   active, open, onToggle, canExit, country, onBack, viewMode, switching, onChangeView,
-  onData, onRefreshError, onRefreshStart,
+  onData, onRefreshError, onRefreshStart, onFilterChange, onQueryDate,
 }) {
   const rootRef = useRef(null);
   const ready = country?.status === "ready";
+  const [timelineStats, setTimelineStats] = useState(null);
+  const [prevIso3, setPrevIso3] = useState(country?.iso3);
+
+  // Reset timeline filter when switching country
+  if (country?.iso3 !== prevIso3) {
+    setPrevIso3(country?.iso3);
+    setTimelineStats(null);
+  }
+
+  const handleFilteredPoints = useCallback((points, stats) => {
+    setTimelineStats(stats);
+    onFilterChange?.(points);
+  }, [onFilterChange]);
 
   useGSAP(
     () => {
@@ -164,7 +194,15 @@ function CountrySidebar({
           </p>
           <h2 className="hud-title">{country?.name ?? "—"}</h2>
           <p className="hud-sub">Thermal detections · MODIS + VIIRS · last 24 h</p>
-          <HudBody country={country} />
+          {ready && (
+            <TimelineControls
+              rawPoints={country?.data?.points}
+              onFiltered={handleFilteredPoints}
+              onQueryDate={onQueryDate}
+              disabled={!canExit || switching}
+            />
+          )}
+          <HudBody country={country} timelineStats={timelineStats} />
         </div>
         <button type="button" className="hud-back" onClick={onBack} disabled={!canExit || switching}>
           <span aria-hidden="true">←</span> Back to orbit

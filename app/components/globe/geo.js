@@ -53,8 +53,11 @@ export async function fetchCountryBounds(iso3, signal) {
   return bbox;
 }
 
-export async function fetchCountryHotspots(iso3, signal, refresh = false) {
-  const response = await fetch(`/api/hotspots?country=${iso3}`, {
+export async function fetchCountryHotspots(iso3, signal, refresh = false, options = {}) {
+  const params = new URLSearchParams({ country: iso3 });
+  if (options.date) params.set("date", options.date);
+  if (options.dayRange) params.set("dayRange", String(options.dayRange));
+  const response = await fetch(`/api/hotspots?${params.toString()}`, {
     signal,
     method: refresh ? "POST" : "GET",
   });

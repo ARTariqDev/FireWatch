@@ -74,6 +74,32 @@ test("requests two UTC days but includes only the rolling 24-hour window", async
   assert.ok(url.endsWith("/2"));
 });
 
+test("fetches historical date and preserves detections within that window", async (t) => {
+  const rows = [
+    "latitude,longitude,frp,acq_date,acq_time",
+    "30,60,1,2026-11-01,500",
+    "31,61,2,2026-11-02,1200",
+    "32,62,3,2026-11-03,100",
+  ].join("\n");
+  let url;
+  t.mock.method(globalThis, "fetch", async (input) => {
+    url = input;
+    return new Response(rows);
+  });
+  const start = Date.parse("2026-11-01T00:00:00Z");
+  const end = start + 2 * 24 * 3600 * 1000;
+  const result = await fetchDetections(source, "60,20,80,40", end, {
+    withAcquired: true,
+    date: "2026-11-01",
+    dayRange: 2,
+    windowStart: start,
+  });
+  assert.equal(result.length, 2);
+  assert.equal(result[0][0], 60);
+  assert.equal(result[1][0], 61);
+  assert.ok(url.endsWith("/2/2026-11-01"));
+});
+
 test("reports invalid or missing acquisition times instead of treating them as current", async (t) => {
   t.mock.method(globalThis, "fetch", async () =>
     new Response("latitude,longitude,frp,acq_date,acq_time\n30,60,1,2026-11-14,2460"),

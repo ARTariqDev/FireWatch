@@ -13,28 +13,56 @@ const FRP_COLOR = [
   "interpolate", ["linear"], ["get", "frp"],
   0, "#d3321d", 15, "#ff6a32", 60, "#ffb347", 200, "#fff1c9",
 ];
+
+// Lighter, muted shade for extinguished / put-out fires
+const EXTINGUISHED_CORE_COLOR = [
+  "interpolate", ["linear"], ["get", "frp"],
+  0, "#e8baa3", 15, "#f3cbba", 60, "#fce4d4", 200, "#ffffff",
+];
+
+const CORE_COLOR = [
+  "case",
+  ["==", ["get", "extinguished"], 1],
+  EXTINGUISHED_CORE_COLOR,
+  FRP_COLOR,
+];
+
+const GLOW_COLOR = [
+  "case",
+  ["==", ["get", "extinguished"], 1],
+  "#cfa08c",
+  FRP_COLOR,
+];
+
 const byFrp = (low, high) => ["interpolate", ["linear"], ["get", "frp"], 0, low, 100, high];
 export function toFeatureCollection(points) {
   return {
     type: "FeatureCollection",
     features: points
       .filter((point) => (point[4] ?? 1) === 1)
-      .map(([lng, lat, frp, sensor, inside = 1]) => ({
+      .map(([lng, lat, frp, sensor, inside = 1, acquired, extinguished = 0]) => ({
         type: "Feature",
         geometry: { type: "Point", coordinates: [lng, lat] },
-        properties: { frp, sensor, in: inside },
+        properties: {
+          frp,
+          sensor,
+          in: inside,
+          acquired,
+          extinguished: Number(extinguished) || 0,
+        },
       })),
   };
 }
 
 // Pulse only the brightest slice of whatever is on screen, so quiet countries still get rings.
+// Extinguished fires never pulse.
 function pulseFilter(points) {
   const brightness = points
-    .filter((point) => (point[4] ?? 1) === 1)
+    .filter((point) => (point[4] ?? 1) === 1 && (point[6] ?? 0) !== 1)
     .map((point) => point[2])
     .sort((a, b) => a - b);
   const cutoff = brightness.length ? brightness[Math.floor(brightness.length * (1 - PULSE_SHARE))] : 0;
-  return ["all", [">=", ["get", "frp"], cutoff], ["==", ["get", "in"], 1]];
+  return ["all", [">=", ["get", "frp"], cutoff], ["==", ["get", "in"], 1], ["!=", ["get", "extinguished"], 1]];
 }
 
 export function setHotspots(map, points) {
@@ -98,9 +126,14 @@ export function addHotspotLayers(map) {
     type: "circle",
     source: HOTSPOT_SOURCE,
     paint: {
-      "circle-color": FRP_COLOR,
+      "circle-color": GLOW_COLOR,
       "circle-blur": 1,
-      "circle-opacity": 0.3,
+      "circle-opacity": [
+        "case",
+        ["==", ["get", "extinguished"], 1],
+        0.16,
+        0.3,
+      ],
       "circle-radius": [
         "interpolate", ["linear"], ["zoom"],
         1, byFrp(4, 11), 5, byFrp(9, 26), 9, byFrp(16, 42),
@@ -111,7 +144,7 @@ export function addHotspotLayers(map) {
     id: PULSE_LAYER,
     type: "circle",
     source: HOTSPOT_SOURCE,
-    filter: ["==", ["get", "in"], 1],
+    filter: ["all", ["==", ["get", "in"], 1], ["!=", ["get", "extinguished"], 1]],
     paint: {
       "circle-radius": 0,
       "circle-color": "rgba(0,0,0,0)",
@@ -125,10 +158,20 @@ export function addHotspotLayers(map) {
     type: "circle",
     source: HOTSPOT_SOURCE,
     paint: {
-      "circle-color": FRP_COLOR,
-      "circle-opacity": 1,
+      "circle-color": CORE_COLOR,
+      "circle-opacity": [
+        "case",
+        ["==", ["get", "extinguished"], 1],
+        0.55,
+        1,
+      ],
       "circle-radius": ["interpolate", ["linear"], ["zoom"], 1, 1.5, 5, 2.8, 9, 5],
-      "circle-stroke-color": "#0b0b0a",
+      "circle-stroke-color": [
+        "case",
+        ["==", ["get", "extinguished"], 1],
+        "rgba(80, 65, 55, 0.4)",
+        "#0b0b0a",
+      ],
       "circle-stroke-width": 0.5,
     },
   });

@@ -119,6 +119,28 @@ function Hero() {
     requestRef.current = null;
   }, []);
 
+  const handleFilterChange = useCallback((filteredPoints) => {
+    globeRef.current?.updateHotspots(filteredPoints);
+  }, []);
+
+  const handleQueryDate = useCallback(
+    async (options) => {
+      if (!country?.iso3) return null;
+      try {
+        const data = await fetchCountryHotspots(country.iso3, null, false, options);
+        if (data) {
+          setCountry((current) => ({ ...current, status: "ready", data }));
+          globeRef.current?.updateHotspots(data.points, data.country);
+        }
+        return data;
+      } catch (err) {
+        console.error("Failed to query historical dates:", err);
+        return null;
+      }
+    },
+    [country],
+  );
+
   const expanded = phase === "flying" || phase === "country";
 
   return (
@@ -158,6 +180,8 @@ function Hero() {
             onData={applyRefresh}
             onRefreshError={handleRefreshError}
             onRefreshStart={cancelInitialRequest}
+            onFilterChange={handleFilterChange}
+            onQueryDate={handleQueryDate}
           />
         )}
       </section>
