@@ -2,16 +2,17 @@ import gsap from "gsap";
 import {
   NO_PADDING,
   ORBIT_LAT,
+  fitPadding,
   orbitLayout,
   paddingToward,
   setInteractive,
   slotCenter,
   syncCamera,
-} from "./camera";
-import { prefersReducedMotion, shortestLng } from "./geo";
-import { ensureCountryLayers, hideCountry, setHotspots, showCountry } from "./layers";
-import { PREVIEW_POINTS } from "./previewPoints";
-import { ensureTerrainSource, TERRAIN_EXAGGERATION } from "./terrain";
+} from "./camera.js";
+import { prefersReducedMotion, shortestLng } from "./geo.js";
+import { ensureCountryLayers, hideCountry, setHotspots, showCountry } from "./layers.js";
+import { PREVIEW_POINTS } from "./previewPoints.js";
+import { ensureTerrainSource, TERRAIN_EXAGGERATION } from "./terrain.js";
 
 const PAGE_LOCK_CLASS = "globe-locked";
 // Countries wider than this (e.g. ones spanning the antimeridian) are framed around a point instead.
@@ -30,13 +31,15 @@ function tween(state, vars, apply) {
   });
 }
 
-// Keeps the country clear of the HUD card: docked left on desktop, above the card on small screens.
-function framePadding() {
-  if (window.innerWidth > 1000) return { top: 100, bottom: 100, left: 460, right: 100 };
-
+// Keeps the country clear of the sidebar or bottom drawer.
+export function framePadding() {
+  const sidebar = document.querySelector(".country-sidebar");
+  const open = sidebar?.dataset.open !== "false";
+  if (window.innerWidth > 1000) {
+    return { top: 100, bottom: 100, left: open ? (sidebar?.offsetWidth ?? 360) + 100 : 80, right: 100 };
+  }
   const side = Math.round(window.innerWidth * 0.06);
-  const hud = document.querySelector(".country-hud");
-  return { top: 140, bottom: (hud?.offsetHeight ?? 260) + 80, left: side, right: side };
+  return { top: 110, bottom: open ? (sidebar?.offsetHeight ?? 300) + 24 : 70, left: side, right: side };
 }
 
 // Zoom is fitted on the flat map, then nudged in for the tilted view, where distance shrinks the country.
@@ -46,9 +49,12 @@ function countryFocus(map, bbox, fallback, view) {
   if (bbox) {
     const [west, south, east, north] = bbox;
     if (east - west <= MAX_FRAMED_SPAN.lng && north - south <= MAX_FRAMED_SPAN.lat) {
+      const { width, height } = map.getContainer().getBoundingClientRect();
+      const padding = fitPadding(framePadding(), width, height);
+      if (!padding) return { lng: fallback.lng, lat: fallback.lat, zoom: 3.4 + (view.pitch ? TILT_ZOOM_BOOST : 0) };
       const framed = map.cameraForBounds(
         [[west, south], [east, north]],
-        { padding: framePadding(), maxZoom: 7 },
+        { padding, maxZoom: 7 },
       );
       if (framed) {
         const center = Array.isArray(framed.center)
@@ -62,16 +68,19 @@ function countryFocus(map, bbox, fallback, view) {
 }
 
 // Orbit -> country: swing the country to face us, then plunge in until it fills the screen.
-export async function flyToCountry(stage, { iso3, focus, request }) {
-  if (!(await stage.ready) || stage.mode !== "orbit") return false;
+export async function flyToCountry(stage, { iso3, focus, request, bounds }) {
+  if (!(await stage.ready) || !["intro", "orbit"].includes(stage.mode)) return false;
+  if (stage.mode === "intro") gsap.killTweensOf(stage.camera.state);
 
   const { map, camera, container, slot } = stage;
+  const flight = Symbol("country flight");
+  stage.activeFlight = flight;
   stage.mode = "flight";
   stage.viewMode = "3d";
+  setHotspots(map, []);
   document.documentElement.classList.add(PAGE_LOCK_CLASS);
 
-  // Country boundaries and terrain are only fetched once the visitor asks for them.
-  ensureCountryLayers(map);
+  // Terrain is only fetched once the visitor asks for it.
   ensureTerrainSource(map);
 
   // Promote the canvas to a viewport-sized layer without moving the globe on screen.
@@ -81,26 +90,35 @@ export async function flyToCountry(stage, { iso3, focus, request }) {
   Object.assign(camera.state, paddingToward(container.getBoundingClientRect(), restingCenter));
   camera.apply();
 
-  await tween(
-    camera.state,
-    {
-      lng: shortestLng(camera.state.lng, focus.lng),
-      lat: focus.lat,
-      zoom: camera.state.zoom + 0.55,
-      ...NO_PADDING,
-      duration: seconds(2.4),
-      ease: "power3.inOut",
-    },
-    camera.apply,
-  );
+  const [bbox] = await Promise.all([
+    bounds,
+    tween(
+      camera.state,
+      {
+        lng: shortestLng(camera.state.lng, focus.lng),
+        lat: focus.lat,
+        zoom: camera.state.zoom + 0.55,
+        ...NO_PADDING,
+        duration: seconds(0.9),
+        ease: "power3.inOut",
+      },
+      camera.apply,
+    ),
+  ]);
+  if (stage.activeFlight !== flight) return false;
 
-  // The illustrative preview is always replaced; if the live feed failed the country is shown empty, never fake.
-  const data = await request;
+  ensureCountryLayers(map);
   stage.highlight = showCountry(map, iso3);
-  setHotspots(map, data?.points ?? []);
+  request.then((data) => {
+    if (stage.activeFlight !== flight || !data) return;
+    stage.highlight?.pause();
+    ensureCountryLayers(map, data.country);
+    stage.highlight = showCountry(map, iso3);
+    setHotspots(map, data.points);
+  });
 
   const view = VIEWS[stage.viewMode];
-  const target = countryFocus(map, data?.country?.bbox, focus, view);
+  const target = countryFocus(map, bbox, focus, view);
   await tween(
     camera.state,
     {
@@ -108,12 +126,13 @@ export async function flyToCountry(stage, { iso3, focus, request }) {
       lat: target.lat,
       zoom: target.zoom,
       ...view,
-      duration: seconds(3.4),
+      duration: seconds(1.4),
       ease: "power2.inOut",
     },
     camera.apply,
   );
 
+  if (stage.activeFlight !== flight) return false;
   setInteractive(map, true, true);
   stage.mode = "country";
   return true;
@@ -134,7 +153,7 @@ export async function setViewMode(stage, mode) {
     {
       ...VIEWS[mode],
       bearing: shortestLng(camera.state.bearing, VIEWS[mode].bearing),
-      duration: seconds(1.4),
+      duration: seconds(0.7),
       ease: "power2.inOut",
     },
     camera.apply,
@@ -151,6 +170,7 @@ export async function returnToOrbit(stage) {
 
   const { map, camera, container, slot } = stage;
   stage.mode = "flight";
+  stage.activeFlight = null;
   setInteractive(map, false);
 
   // The visitor may have panned, zoomed or tilted, so start from the live camera.
@@ -158,7 +178,7 @@ export async function returnToOrbit(stage) {
 
   stage.highlight?.pause();
   hideCountry(map);
-  setHotspots(map, PREVIEW_POINTS);
+  setHotspots(map, []);
 
   const layout = orbitLayout(container, slot);
   await tween(
@@ -169,7 +189,7 @@ export async function returnToOrbit(stage) {
       pitch: 0,
       bearing: shortestLng(camera.state.bearing, 0),
       terrain: 0,
-      duration: seconds(2.8),
+      duration: seconds(1.2),
       ease: "power3.inOut",
     },
     camera.apply,
@@ -177,6 +197,7 @@ export async function returnToOrbit(stage) {
 
   container.classList.remove("is-fixed");
   map.resize();
+  setHotspots(map, PREVIEW_POINTS);
   Object.assign(camera.state, orbitLayout(container, slot));
   camera.apply();
 

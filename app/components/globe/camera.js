@@ -1,4 +1,4 @@
-import { applyTerrain } from "./terrain";
+import { applyTerrain } from "./terrain.js";
 
 const TILE_SIZE = 512;
 export const ORBIT_LAT = 16;
@@ -35,6 +35,23 @@ export function orbitLayout(container, slot) {
 }
 
 export const NO_PADDING = { padL: 0, padR: 0, padT: 0, padB: 0 };
+
+// Preserve a usable area even when the HUD occupies most of a small viewport.
+export function fitPadding(padding, width, height) {
+  if (width <= 0 || height <= 0) return null;
+  const scaleFor = (total, size) => {
+    const available = size - Math.min(120, size / 2);
+    return total > available ? available / total : 1;
+  };
+  const horizontal = scaleFor(padding.left + padding.right, width);
+  const vertical = scaleFor(padding.top + padding.bottom, height);
+  return {
+    left: padding.left * horizontal,
+    right: padding.right * horizontal,
+    top: padding.top * vertical,
+    bottom: padding.bottom * vertical,
+  };
+}
 
 // A plain object GSAP can tween; `apply` pushes it to the map. Terrain is quantised so it updates in steps.
 export function createCamera(map) {

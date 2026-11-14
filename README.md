@@ -20,6 +20,12 @@ You can start editing the page by modifying `app/page.tsx`. The page auto-update
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
+## Country hotspots
+
+The map requests country bounds from `/api/country?country=PAK` and NASA FIRMS detections from `/api/hotspots?country=PAK` in parallel. The map can open while detections are loading; only real detections within the selected country's boundary from the rolling last 24 hours are shown. Substitute any supported ISO alpha-3 country code for `PAK`. The country view checks automatically every 30 minutes; its refresh button requests fresh data immediately.
+
+The country sidebar holds the map controls and statistics. It can be hidden or shown, and becomes a bottom drawer on smaller screens. Country views open in 3D by default.
+
 ## Learn More
 
 To learn more about Next.js, take a look at the following resources:

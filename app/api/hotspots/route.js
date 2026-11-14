@@ -1,8 +1,9 @@
-import { getCountryHotspots } from "@/lib/hotspots";
+import { revalidateTag } from "next/cache";
+import { countryHotspotTag, getCountryHotspots } from "@/lib/hotspots";
 
 // Keeps the FIRMS MAP_KEY on the server and returns compact [lon, lat, frp, sensor, inside] points.
 // The landing globe uses sample points, so live data is only ever requested for one country.
-export async function GET(request) {
+async function respond(request, refresh) {
   const iso3 = request.nextUrl.searchParams.get("country")?.toUpperCase();
 
   if (!iso3 || !/^[A-Z]{3}$/.test(iso3)) {
@@ -10,13 +11,17 @@ export async function GET(request) {
   }
 
   try {
+    if (refresh) revalidateTag(countryHotspotTag(iso3), { expire: 0 });
     const data = await getCountryHotspots(iso3);
     if (!data) return Response.json({ error: "Unknown country" }, { status: 404 });
     return Response.json(data, {
-      headers: { "Cache-Control": "public, s-maxage=900, stale-while-revalidate=300" },
+      headers: { "Cache-Control": refresh ? "no-store" : "public, s-maxage=900, stale-while-revalidate=300" },
     });
   } catch (error) {
     console.error("Hotspot request failed:", error instanceof Error ? error.message : error);
     return Response.json({ error: "Hotspot feed unavailable" }, { status: 502 });
   }
 }
+
+export const GET = (request) => respond(request, false);
+export const POST = (request) => respond(request, true);

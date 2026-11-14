@@ -14,17 +14,16 @@ const FRP_COLOR = [
   0, "#d3321d", 15, "#ff6a32", 60, "#ffb347", 200, "#fff1c9",
 ];
 const byFrp = (low, high) => ["interpolate", ["linear"], ["get", "frp"], 0, low, 100, high];
-// Detections just outside the highlighted country render dimmer for context.
-const CONTEXT_DIM = ["case", ["==", ["get", "in"], 0], 0.4, 1];
-
 export function toFeatureCollection(points) {
   return {
     type: "FeatureCollection",
-    features: points.map(([lng, lat, frp, sensor, inside = 1]) => ({
-      type: "Feature",
-      geometry: { type: "Point", coordinates: [lng, lat] },
-      properties: { frp, sensor, in: inside },
-    })),
+    features: points
+      .filter((point) => (point[4] ?? 1) === 1)
+      .map(([lng, lat, frp, sensor, inside = 1]) => ({
+        type: "Feature",
+        geometry: { type: "Point", coordinates: [lng, lat] },
+        properties: { frp, sensor, in: inside },
+      })),
   };
 }
 
@@ -43,17 +42,36 @@ export function setHotspots(map, points) {
   map.setFilter(PULSE_LAYER, pulseFilter(points));
 }
 
-// Added on first use so the landing page never downloads country boundaries it doesn't show.
-export function ensureCountryLayers(map) {
-  if (map.getSource(COUNTRY_SOURCE)) return;
+// Use the filtering geometry for the outline; fall back to Mapbox when the feed is unavailable.
+export function ensureCountryLayers(map, country) {
+  const geometry = country?.geometry;
+  const sourceType = geometry ? "geojson" : "vector";
+  const existing = map.getSource(COUNTRY_SOURCE);
+  const data = geometry && {
+    type: "Feature",
+    geometry,
+    properties: { iso_3166_1_alpha_3: country.iso3, worldview: "all" },
+  };
+  if (existing?.type === sourceType) {
+    if (data) existing.setData(data);
+    return false;
+  }
+  if (existing) {
+    map.removeLayer("country-fill");
+    map.removeLayer("country-line");
+    map.removeSource(COUNTRY_SOURCE);
+  }
   const labelLayer = map.getStyle().layers.find((layer) => layer.type === "symbol")?.id;
-  map.addSource(COUNTRY_SOURCE, { type: "vector", url: "mapbox://mapbox.country-boundaries-v1" });
+  map.addSource(COUNTRY_SOURCE, geometry
+    ? { type: "geojson", data }
+    : { type: "vector", url: "mapbox://mapbox.country-boundaries-v1" });
+  const sourceLayer = geometry ? {} : { "source-layer": COUNTRY_LAYER };
   map.addLayer(
     {
       id: "country-fill",
       type: "fill",
       source: COUNTRY_SOURCE,
-      "source-layer": COUNTRY_LAYER,
+      ...sourceLayer,
       filter: NO_COUNTRY,
       paint: { "fill-color": "#ff6a32", "fill-opacity": 0 },
     },
@@ -64,12 +82,13 @@ export function ensureCountryLayers(map) {
       id: "country-line",
       type: "line",
       source: COUNTRY_SOURCE,
-      "source-layer": COUNTRY_LAYER,
+      ...sourceLayer,
       filter: NO_COUNTRY,
       paint: { "line-color": "#ffb27a", "line-width": 1.6, "line-opacity": 0 },
     },
     labelLayer,
   );
+  return true;
 }
 
 export function addHotspotLayers(map) {
@@ -81,7 +100,7 @@ export function addHotspotLayers(map) {
     paint: {
       "circle-color": FRP_COLOR,
       "circle-blur": 1,
-      "circle-opacity": ["*", 0.3, CONTEXT_DIM],
+      "circle-opacity": 0.3,
       "circle-radius": [
         "interpolate", ["linear"], ["zoom"],
         1, byFrp(4, 11), 5, byFrp(9, 26), 9, byFrp(16, 42),
@@ -107,7 +126,7 @@ export function addHotspotLayers(map) {
     source: HOTSPOT_SOURCE,
     paint: {
       "circle-color": FRP_COLOR,
-      "circle-opacity": CONTEXT_DIM,
+      "circle-opacity": 1,
       "circle-radius": ["interpolate", ["linear"], ["zoom"], 1, 1.5, 5, 2.8, 9, 5],
       "circle-stroke-color": "#0b0b0a",
       "circle-stroke-width": 0.5,

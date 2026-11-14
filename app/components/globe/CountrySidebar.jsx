@@ -6,6 +6,8 @@ import { useGSAP } from "@gsap/react";
 import gsap from "gsap";
 import { animate, stagger } from "animejs";
 import { prefersReducedMotion } from "./geo";
+import HotspotRefresh from "./HotspotRefresh";
+import ViewModeSwitch from "./ViewModeSwitch";
 
 gsap.registerPlugin(useGSAP);
 
@@ -63,9 +65,6 @@ function HudBody({ country }) {
           <span>HOTTER</span>
         </div>
       )}
-      {stats.context > 0 && (
-        <p className="hud-context">+{format(stats.context)} dimmer detections just across the border</p>
-      )}
       <p className="hud-updated">
         CHECKED {formatTime(stats.generatedAt)} · AUTO-REFRESH EVERY 30 MIN
       </p>
@@ -73,42 +72,26 @@ function HudBody({ country }) {
   );
 }
 
-// Country readout that slides in once the globe starts its descent.
-function CountryHud({ open, canExit, country, onBack }) {
+function CountrySidebar({
+  active, open, onToggle, canExit, country, onBack, viewMode, switching, onChangeView,
+  onData, onRefreshError, onRefreshStart,
+}) {
   const rootRef = useRef(null);
   const ready = country?.status === "ready";
 
   useGSAP(
     () => {
-      const root = rootRef.current;
-      if (prefersReducedMotion()) {
-        gsap.set(root, { visibility: open ? "visible" : "hidden" });
-        return;
-      }
-      if (open) {
-        gsap.fromTo(
-          root,
-          { visibility: "visible", clipPath: "inset(0 100% 0 0)", x: -44 },
-          {
-            clipPath: "inset(0 0% 0 0)",
-            x: 0,
-            duration: 0.9,
-            delay: 0.5,
-            ease: "power3.out",
-            onComplete: () => gsap.set(root, { clearProps: "clipPath,transform" }),
-          },
-        );
-      } else if (root.style.visibility === "visible") {
-        gsap.to(root, {
-          clipPath: "inset(0 100% 0 0)",
-          x: -30,
-          duration: 0.5,
-          ease: "power3.in",
-          onComplete: () => gsap.set(root, { visibility: "hidden" }),
-        });
-      }
+      if (prefersReducedMotion()) return;
+      const media = gsap.matchMedia();
+      media.add("(max-width: 1000px)", () =>
+        gsap.from(".sidebar-panel", { y: 40, duration: 0.65, ease: "power3.out", clearProps: "transform" }),
+      );
+      media.add("(min-width: 1001px)", () =>
+        gsap.from(".sidebar-panel", { x: -40, duration: 0.65, ease: "power3.out", clearProps: "transform" }),
+      );
+      return () => media.revert();
     },
-    { scope: rootRef, dependencies: [open] },
+    { scope: rootRef },
   );
 
   // Anime.js: numbers count up while their masked cells rise into view.
@@ -140,22 +123,55 @@ function CountryHud({ open, canExit, country, onBack }) {
       );
     });
     return () => animations.forEach((animation) => animation.pause());
-  }, [ready, country?.iso3]);
+  }, [ready, country?.iso3, country?.data?.stats?.generatedAt]);
 
   return (
-    <aside ref={rootRef} className="country-hud" aria-live="polite" aria-hidden={!open}>
-      <p className="hud-eyebrow">
-        <i aria-hidden="true" />
-        {country?.located ? "YOUR REGION · FROM DEVICE LOCATION" : "DEFAULT REGION · LOCATION UNAVAILABLE"}
-      </p>
-      <h2 className="hud-title">{country?.name ?? "—"}</h2>
-      <p className="hud-sub">Thermal detections · MODIS + VIIRS · last 24 h</p>
-      <HudBody country={country} />
-      <button type="button" className="hud-back" onClick={onBack} disabled={!canExit} tabIndex={open ? 0 : -1}>
-        <span aria-hidden="true">←</span> Back to orbit
+    <aside
+      ref={rootRef}
+      className="country-sidebar"
+      data-active={active}
+      data-open={open}
+      aria-label="Hotspot statistics"
+      aria-hidden={!active}
+    >
+      <button
+        type="button"
+        className="sidebar-toggle"
+        aria-controls="country-sidebar-panel"
+        aria-expanded={open}
+        onClick={onToggle}
+        disabled={!active}
+      >
+        <span className="sidebar-toggle-icon" aria-hidden="true">{open ? "−" : "+"}</span>
+        {open ? "Hide panel" : "Show panel"}
       </button>
+      <div id="country-sidebar-panel" className="sidebar-panel" inert={!active || !open}>
+        <div className="sidebar-controls">
+          <ViewModeSwitch enabled={canExit && !switching} mode={viewMode} onChange={onChangeView} />
+          <HotspotRefresh
+            iso3={country?.iso3}
+            enabled={canExit}
+            switching={switching}
+            onData={onData}
+            onError={onRefreshError}
+            onRefreshStart={onRefreshStart}
+          />
+        </div>
+        <div aria-live="polite">
+          <p className="hud-eyebrow">
+            <i aria-hidden="true" />
+            {country?.located ? "YOUR REGION · FROM DEVICE LOCATION" : "DEFAULT REGION · LOCATION UNAVAILABLE"}
+          </p>
+          <h2 className="hud-title">{country?.name ?? "—"}</h2>
+          <p className="hud-sub">Thermal detections · MODIS + VIIRS · last 24 h</p>
+          <HudBody country={country} />
+        </div>
+        <button type="button" className="hud-back" onClick={onBack} disabled={!canExit || switching}>
+          <span aria-hidden="true">←</span> Back to orbit
+        </button>
+      </div>
     </aside>
   );
 }
 
-export default CountryHud;
+export default CountrySidebar;

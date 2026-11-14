@@ -2,7 +2,8 @@ import "mapbox-gl/dist/mapbox-gl.css";
 import gsap from "gsap";
 import { ORBIT_LAT, createCamera, orbitLayout, setInteractive } from "./camera";
 import { MAPBOX_TOKEN, prefersReducedMotion } from "./geo";
-import { addHotspotLayers, setHotspots, startPulse } from "./layers";
+import { addHotspotLayers, ensureCountryLayers, setHotspots, showCountry, startPulse } from "./layers";
+import { MAP_STYLE, monitorMapErrors } from "./mapErrors";
 import { PREVIEW_POINTS } from "./previewPoints";
 import { flyToCountry, returnToOrbit, setViewMode } from "./flights";
 
@@ -25,7 +26,7 @@ export function createGlobe({ mapboxgl, container, slot, onFeed }) {
   const map = new mapboxgl.Map({
     container,
     accessToken: MAPBOX_TOKEN,
-    style: "mapbox://styles/mapbox/dark-v11",
+    style: MAP_STYLE,
     projection: "globe",
     center: [START_LNG, ORBIT_LAT],
     zoom: 0.5,
@@ -48,6 +49,7 @@ export function createGlobe({ mapboxgl, container, slot, onFeed }) {
     viewMode: "3d",
     pulse: null,
     highlight: null,
+    activeFlight: null,
     ready: new Promise((resolve) => (markReady = resolve)),
   };
 
@@ -86,12 +88,13 @@ export function createGlobe({ mapboxgl, container, slot, onFeed }) {
       onUpdate: camera.apply,
       onComplete: () => {
         stage.mode = "orbit";
-        markReady(true);
       },
     });
+    markReady(true);
   }
 
   map.on("load", () => {
+    if (stage.mode !== "boot") return;
     map.setFog(FOG);
     addHotspotLayers(map);
     setHotspots(map, PREVIEW_POINTS);
@@ -99,12 +102,13 @@ export function createGlobe({ mapboxgl, container, slot, onFeed }) {
     startIntro();
   });
 
-  map.on("error", (event) => {
-    console.error("Mapbox error:", event.error?.message ?? event.error);
-    if (stage.mode === "boot" && [401, 403, 404].includes(event.error?.status)) {
+  const stopMonitoringErrors = monitorMapErrors(map, {
+    isBooting: () => stage.mode === "boot",
+    onFatal: () => {
+      stage.mode = "error";
       onFeed({ status: "map-error" });
       markReady(false);
-    }
+    },
   });
 
   if (!prefersReducedMotion()) gsap.ticker.add(spin);
@@ -124,16 +128,23 @@ export function createGlobe({ mapboxgl, container, slot, onFeed }) {
     fly: (options) => flyToCountry(stage, options),
     back: () => returnToOrbit(stage),
     setView: (mode) => setViewMode(stage, mode),
-    updateHotspots(points) {
-      if (stage.mode === "country") setHotspots(map, points);
+    updateHotspots(points, country) {
+      if (stage.mode !== "country" && !(stage.mode === "flight" && stage.activeFlight)) return;
+      if (country?.geometry) {
+        stage.highlight?.pause();
+        if (ensureCountryLayers(map, country)) stage.highlight = showCountry(map, country.iso3);
+      }
+      setHotspots(map, points);
     },
     destroy() {
+      stage.activeFlight = null;
       markReady(false);
       gsap.ticker.remove(spin);
       gsap.killTweensOf(camera.state);
       window.removeEventListener("resize", relayout);
       resizeObserver.disconnect();
       visibilityObserver.disconnect();
+      stopMonitoringErrors();
       stage.pulse?.pause();
       stage.highlight?.pause();
       document.documentElement.classList.remove("globe-locked");

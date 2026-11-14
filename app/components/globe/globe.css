@@ -27,6 +27,10 @@
   bottom: 52px;
 }
 
+.firewatch-hero[data-expanded="true"][data-sidebar-open="true"] .globe-stage .mapboxgl-ctrl-bottom-left {
+  left: calc(min(360px, 100vw - 72px) + 32px);
+}
+
 html.globe-locked {
   overflow: hidden;
 }
@@ -106,6 +110,16 @@ html.globe-locked {
 }
 
 @media (max-width: 1000px) {
+  .firewatch-hero[data-expanded="true"][data-sidebar-open="true"] .globe-stage .mapboxgl-ctrl-bottom-left,
+  .firewatch-hero[data-expanded="true"][data-sidebar-open="true"] .globe-stage .mapboxgl-ctrl-bottom-right {
+    top: 84px;
+    bottom: auto;
+  }
+
+  .firewatch-hero[data-expanded="true"][data-sidebar-open="true"] .globe-stage .mapboxgl-ctrl-bottom-left {
+    left: 0;
+  }
+
   .globe-slot {
     min-height: min(112vw, 520px);
   }

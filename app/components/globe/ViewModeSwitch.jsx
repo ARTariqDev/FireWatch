@@ -5,10 +5,10 @@ const OPTIONS = [
   ["2d", "2D"],
 ];
 
-// Segmented 3D / 2D control for the country view. Hidden in orbit, disabled mid-flight.
-function ViewModeSwitch({ visible, enabled, mode, onChange }) {
+// Segmented 3D / 2D control for the country view.
+function ViewModeSwitch({ enabled, mode, onChange }) {
   return (
-    <div className="view-switch" data-visible={visible} data-mode={mode} role="group" aria-label="Map view">
+    <div className="view-switch" data-mode={mode} role="group" aria-label="Map view">
       {OPTIONS.map(([value, label]) => (
         <button
           key={value}
@@ -16,7 +16,6 @@ function ViewModeSwitch({ visible, enabled, mode, onChange }) {
           className="view-switch-option"
           aria-pressed={mode === value}
           disabled={!enabled}
-          tabIndex={visible ? 0 : -1}
           onClick={() => onChange(value)}
         >
           {label}

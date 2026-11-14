@@ -36,9 +36,8 @@ function GlobeStage({ ref, slotRef, onFeed }) {
     let cancelled = false;
     const cancelIdle = whenIdle(() => {
       // Mapbox GL and its CSS are heavy and browser-only, so they load as one lazy chunk.
-      import("./createGlobe")
-        .then(async ({ createGlobe }) => {
-          const { default: mapboxgl } = await import("mapbox-gl");
+      Promise.all([import("./createGlobe"), import("mapbox-gl")])
+        .then(([{ createGlobe }, { default: mapboxgl }]) => {
           if (cancelled) return;
           globeRef.current = createGlobe({
             mapboxgl,
@@ -68,7 +67,7 @@ function GlobeStage({ ref, slotRef, onFeed }) {
       flyToCountry: async (options) => (await created.promise)?.fly(options) ?? false,
       returnToOrbit: async () => (await created.promise)?.back() ?? false,
       setViewMode: async (mode) => (await created.promise)?.setView(mode) ?? false,
-      updateHotspots: (points) => globeRef.current?.updateHotspots(points),
+      updateHotspots: (points, country) => globeRef.current?.updateHotspots(points, country),
     }),
     [created],
   );

@@ -46,8 +46,18 @@ export async function resolveCountry({ lng, lat }) {
   }
 }
 
-export async function fetchCountryHotspots(iso3) {
-  const response = await fetch(`/api/hotspots?country=${iso3}`);
+export async function fetchCountryBounds(iso3, signal) {
+  const response = await fetch(`/api/country?country=${iso3}`, { signal });
+  if (!response.ok) throw new Error(`Country bounds request failed (${response.status})`);
+  const { bbox } = await response.json();
+  return bbox;
+}
+
+export async function fetchCountryHotspots(iso3, signal, refresh = false) {
+  const response = await fetch(`/api/hotspots?country=${iso3}`, {
+    signal,
+    method: refresh ? "POST" : "GET",
+  });
   if (!response.ok) throw new Error(`Hotspot request failed (${response.status})`);
   return response.json();
 }

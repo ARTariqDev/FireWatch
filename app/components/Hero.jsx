@@ -5,33 +5,35 @@ import dynamic from "next/dynamic";
 import { useCallback, useEffect, useRef, useState } from "react";
 import GlobeReadout from "./globe/GlobeReadout";
 import GlobeStage from "./globe/GlobeStage";
-import ViewModeSwitch from "./globe/ViewModeSwitch";
-import { DEFAULT_COUNTRY, fetchCountryHotspots, locateUser, resolveCountry } from "./globe/geo";
-import { useHotspotPolling } from "./globe/useHotspotPolling";
+import { DEFAULT_COUNTRY, fetchCountryBounds, fetchCountryHotspots, locateUser, resolveCountry } from "./globe/geo";
 import HeroBackdrop from "./hero/HeroBackdrop";
 import HeroCopy from "./hero/HeroCopy";
 import HeroFooter from "./hero/HeroFooter";
 import HeroNav from "./hero/HeroNav";
 
-// The readout card (and Anime.js with it) is only needed after the first click, so it loads on demand.
-const loadHud = () => import("./globe/CountryHud");
-const CountryHud = dynamic(loadHud, { ssr: false });
+// The sidebar (and Anime.js with it) is only needed after the first click, so it loads on demand.
+const loadSidebar = () => import("./globe/CountrySidebar");
+const CountrySidebar = dynamic(loadSidebar, { ssr: false });
 
 // phase: orbit -> locating -> flying -> country -> returning -> orbit
 function Hero() {
   const globeRef = useRef(null);
   const slotRef = useRef(null);
+  const requestRef = useRef(null);
   const [phase, setPhase] = useState("orbit");
   const [feed, setFeed] = useState({ status: "preview" });
   const [country, setCountry] = useState(null);
   const [viewMode, setViewMode] = useState("3d");
   const [switching, setSwitching] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
 
-  // Warm the HUD chunk shortly after load so it appears instantly on click.
+  // Warm the sidebar chunk shortly after load so it appears instantly on click.
   useEffect(() => {
-    const timer = setTimeout(loadHud, 2500);
+    const timer = setTimeout(loadSidebar, 2500);
     return () => clearTimeout(timer);
   }, []);
+
+  useEffect(() => () => requestRef.current?.abort(), []);
 
   const viewHotspots = useCallback(async () => {
     setPhase("locating");
@@ -42,30 +44,41 @@ function Hero() {
     const target = detected ?? DEFAULT_COUNTRY;
 
     setViewMode("3d");
+    setSidebarOpen(true);
     setCountry({ status: "loading", iso3: target.iso3, name: target.name, located: Boolean(detected) });
     setPhase("flying");
 
+    const controller = new AbortController();
+    requestRef.current = controller;
     const update = (change) =>
-      setCountry((current) => (current?.iso3 === target.iso3 ? { ...current, ...change } : current));
-    const request = fetchCountryHotspots(target.iso3).then(
+      setCountry((current) =>
+        !controller.signal.aborted && current?.iso3 === target.iso3 ? { ...current, ...change } : current,
+      );
+    const request = fetchCountryHotspots(target.iso3, controller.signal).then(
       (data) => {
-        update({ status: "ready", name: data.country.name, data });
+        if (!controller.signal.aborted) update({ status: "ready", name: data.country.name, data });
         return data;
       },
       () => {
-        update({ status: "error" });
+        if (!controller.signal.aborted) update({ status: "error" });
         return null;
       },
     );
+    const bounds = fetchCountryBounds(target.iso3, controller.signal).catch((error) => {
+      if (!controller.signal.aborted) console.error("Country bounds request failed:", error);
+      return request.then((data) => data?.country?.bbox ?? null);
+    });
 
     const arrived = await globeRef.current?.flyToCountry({
       iso3: target.iso3,
       focus: detected ? position : DEFAULT_COUNTRY.center,
       request,
+      bounds,
     });
 
     // The globe never started (e.g. the map failed to load): fall back to the landing state.
     if (!arrived) {
+      controller.abort();
       setCountry(null);
       setPhase("orbit");
       return;
@@ -75,6 +88,8 @@ function Hero() {
 
   const backToOrbit = useCallback(async () => {
     setPhase("returning");
+    requestRef.current?.abort();
+    requestRef.current = null;
     await globeRef.current?.returnToOrbit();
     setCountry(null);
     setPhase("orbit");
@@ -94,9 +109,15 @@ function Hero() {
         ? { ...current, status: "ready", name: data.country.name, data }
         : current,
     );
-    globeRef.current?.updateHotspots(data.points);
+    globeRef.current?.updateHotspots(data.points, data.country);
   }, []);
-  useHotspotPolling({ iso3: country?.iso3, enabled: phase === "country", onData: applyRefresh });
+  const handleRefreshError = useCallback(() => {
+    setCountry((current) => current?.status === "loading" ? { ...current, status: "error" } : current);
+  }, []);
+  const cancelInitialRequest = useCallback(() => {
+    requestRef.current?.abort();
+    requestRef.current = null;
+  }, []);
 
   const expanded = phase === "flying" || phase === "country";
 
@@ -106,6 +127,7 @@ function Hero() {
         className="firewatch-hero"
         data-phase={phase}
         data-expanded={expanded}
+        data-sidebar-open={sidebarOpen}
         aria-labelledby="firewatch-title"
       >
         <GlobeStage ref={globeRef} slotRef={slotRef} onFeed={setFeed} />
@@ -122,14 +144,21 @@ function Hero() {
           <HeroFooter />
         </div>
 
-        <ViewModeSwitch
-          visible={expanded}
-          enabled={phase === "country" && !switching}
-          mode={viewMode}
-          onChange={changeView}
-        />
         {country && (
-          <CountryHud open={expanded} canExit={phase === "country"} country={country} onBack={backToOrbit} />
+          <CountrySidebar
+            active={expanded}
+            open={sidebarOpen}
+            onToggle={() => setSidebarOpen((current) => !current)}
+            canExit={phase === "country"}
+            country={country}
+            onBack={backToOrbit}
+            viewMode={viewMode}
+            switching={switching}
+            onChangeView={changeView}
+            onData={applyRefresh}
+            onRefreshError={handleRefreshError}
+            onRefreshStart={cancelInitialRequest}
+          />
         )}
       </section>
     </main>
