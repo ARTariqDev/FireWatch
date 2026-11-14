@@ -222,37 +222,33 @@ The key is to distinguish between **detecting a fire, identifying observations b
 I'd structure the pipeline like this:
 
 ```text
-          MODIS observations       VIIRS observations
-                  │                       │
-                  └───────────┬───────────┘
-                              ▼
-                     Data Harmonisation
-                              │
-                  ┌───────────┴───────────┐
-                  │                       │
-             Native sensor          Spatial and
-               confidence           temporal matching
-                  │                       │
-                  └───────────┬───────────┘
-                              ▼
-                      Fire Tracker
-                              │
-                     Persistent Fire Events
-                              │
-                  ┌───────────┴───────────┐
-                  │                       │
-             Detection              Tracking
-             confidence             confidence
-                  │                       │
-                  └───────────┬───────────┘
-                              ▼
-                      Feature Engineering
-                              │
-                              ▼
-                     Spread Prediction
-                              │
-                              ▼
-                       Web Dashboard
+Next.js (Vercel)
+      |
+      | Request fire data
+      ▼
+Python Backend (Hugging Face)
+      |
+      ├── Fetch MODIS observations
+      |
+      ├── Fetch VIIRS observations
+      |
+      ▼
+Harmonise observations
+      |
+      ▼
+Run fire tracker
+      |
+      ▼
+Generate fire events
+      |
+      ▼
+Run spread prediction models
+      |
+      ▼
+Return GeoJSON
+      |
+      ▼
+Next.js + Mapbox
 ```
 
 This means the tracker receives harmonised observations from both satellites and determines which observations belong to the same fire event.
