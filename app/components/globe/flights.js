@@ -20,8 +20,7 @@ const MAX_FRAMED_SPAN = { lng: 80, lat: 55 };
 
 export const VIEWS = {
   "2d": { pitch: 0, bearing: 0, terrain: 0 },
-  "3d": { pitch: 58, bearing: -14, terrain: TERRAIN_EXAGGERATION },
-  topo: { pitch: 62, bearing: -20, terrain: 3.5 },
+  "3d": { pitch: 62, bearing: -20, terrain: 3.5 },
 };
 
 const seconds = (value) => (prefersReducedMotion() ? 0.01 : value);

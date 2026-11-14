@@ -3,7 +3,6 @@ import "./hud.css";
 const OPTIONS = [
   ["2d", "2D"],
   ["3d", "3D"],
-  ["topo", "TOPO 3D"],
 ];
 
 // Segmented 3D / 2D control for the country view.

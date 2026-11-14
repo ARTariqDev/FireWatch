@@ -64,6 +64,7 @@ function Hero() {
         return null;
       },
     );
+
     const bounds = fetchCountryBounds(target.iso3, controller.signal).catch((error) => {
       if (!controller.signal.aborted) console.error("Country bounds request failed:", error);
       return request.then((data) => data?.country?.bbox ?? null);
