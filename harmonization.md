@@ -55,30 +55,122 @@ Both APIs report confidence metrics:
 
 By cross-referencing spatial proximity ($r \le 1\text{ km}$) with reading time delays ($\Delta t$), we classify all thermal anomalies into four operational tiers:
 
-```
-                       ┌──────────────────────────────────────┐
-                       │           MODIS Detection            │
-                       │           (10:30 AM Terra)           │
-                       └──────────────────┬───────────────────┘
-                                          │
-                               ~3-hour observation delay
-                                          │
-                                          ▼
-                       ┌──────────────────────────────────────┐
-                       │          VIIRS Overpass Scan         │
-                       │         (13:30 PM NOAA-20)           │
-                       └──────────────────┬───────────────────┘
-                                          │
-                  ┌───────────────────────┴───────────────────────┐
-                  ▼                                               ▼
-         [ VIIRS Confirms Fire ]                       [ VIIRS Detects Nothing ]
-                  │                                               │
-                  ▼                                               ▼
-     TIER 1: DUAL-CONFIRMED                          TIER 4: TRANSIENT / EXTINGUISHED
-     • Confidence: 95% - 100%                        • Confidence: Low (< 30%)
-     • Action: Anchor to VIIRS 375m coords           • Action: Mark as extinguished/cool
-     • Significance: Active expanding front          • Significance: Fire put out or false alarm
-```
+```Next.js (Vercel)
+      |
+      | Request fire data
+      ▼
+Python Backend (Hugging Face)
+      |
+      ├── Fetch MODIS observations
+      |
+      ├── Fetch VIIRS observations
+      |
+      ├── Fetch VIIRS observations
+      |
+      ▼
+Harmonise observations
+      |
+      ▼
+Run fire tracker
+      |
+      ▼
+Generate fire events
+      |
+      ▼
+Run spread prediction models
+      |
+      ▼
+Return GeoJSON
+      |
+      ▼
+Next.js + Mapbox
+
+The tracker would reconstruct fire events from the observations available at that time.
+2. Do you need a database?
+
+No.
+
+You could have a Python function:
+def get_fire_events():
+
+    modis = fetch_modis()
+    viirs = fetch_viirs()
+
+    observations = harmonize(modis, viirs)
+
+    fire_events = track_fires(observations)
+
+    predictions = predict_spread(fire_events)
+
+    return build_geojson(fire_events, predictions)
+
+Every request runs the pipeline and returns the latest results.
+
+The tracker doesn't need to remember anything between requests because it reconstructs events from the fetched observation history.
+3. But there's one important consideration
+
+You must fetch enough historical observations for the tracker to reconstruct existing fires.
+
+Imagine:
+
+    Monday: A fire is detected.
+    Tuesday: Additional hotspots are detected.
+    Wednesday: Your application fetches only Wednesday's observations.
+
+If you only give the tracker Wednesday's observations, it won't know that Monday's and Tuesday's detections belong to the same fire.
+
+Instead, fetch a rolling historical window, such as the previous 5–7 days, depending on your tracker configuration.
+
+For longer-lasting fires, you may need a longer window or a way to retrieve older observations.
+
+Also, if your tracker uses a five-day active window, the fetched history must be sufficient to support that rule.
+4. The main disadvantage: computational cost
+
+Running the entire pipeline every time someone opens the dashboard is inefficient.
+
+For example, if 20 people open your dashboard, you could end up fetching satellite data and running the tracker 20 times.
+
+I'd recommend:
+
+    Fetch satellite data periodically (e.g. every three hours).
+    Run harmonisation and tracking after each fetch.
+    Cache the resulting GeoJSON.
+    Let Next.js retrieve the cached result whenever someone opens the dashboard.
+
+This does not require a database. You can use an in-memory cache or persistent file storage, depending on your hosting setup.
+5. My recommendation
+
+Start with this architecture:
+Component	Responsibility
+Next.js	Display fire events and predictions
+Hugging Face / FastAPI	Fetch data, harmonise, track and predict
+Fire tracker	Reconstruct fire events
+ML models	Predict persistence, expansion and additional area
+Cache	Store the latest generated GeoJSON
+
+One distinction: Reconstructing events on every refresh is perfectly reasonable. However, event IDs must be reproducible across refreshes if you want users to follow the same fire over time.
+
+You can generate deterministic IDs based on stable event characteristics, rather than assigning random IDs every time.
+
+That is the approach I'd recommend for your current project: runtime tracking, no database, and periodic caching of the results.
+
+      ▼
+Harmonise observations
+      |
+      ▼
+Run fire tracker
+      |
+      ▼
+Generate fire events
+      |
+      ▼
+Run spread prediction models
+      |
+      ▼
+Return GeoJSON
+      |
+      ▼
+Next.js + Mapbox
 
 | Tier | Category | Trigger Condition | Spatial Representation | Role in Spread Prediction |
 | :--- | :--- | :--- | :--- | :--- |
