@@ -117,3 +117,246 @@ Because we preserve exact UTC acquisition timestamps ($t_{\text{modis}}$ and $t_
 - **Our Harmonization Solution**:
   - In coincident passes, anchoring to VIIRS automatically eliminates MODIS bow-tie duplicates and positional smearing.
   - For standalone MODIS detections, spatial clustering collapses multi-scan duplicates into a single footprint.
+ 
+#suggestions to integrate with firespread model and group related fires using a tracker:
+**Yes, the direction is broadly aligned with what we're building for the spread-prediction model.** In fact, your harmonisation strategy and the fire tracker can complement each other very well.
+
+However, I would make a few important adjustments before integrating them. Some parts of the proposed dashboard strategy are useful for visualisation but could introduce errors if we directly use them for model training.
+
+The key is to distinguish between **detecting a fire, identifying observations belonging to the same fire, and predicting how that fire will spread.**
+
+## 1. How the two systems should work together
+
+I'd structure the pipeline like this:
+
+```text
+          MODIS observations       VIIRS observations
+                  │                       │
+                  └───────────┬───────────┘
+                              ▼
+                     Data Harmonisation
+                              │
+                  ┌───────────┴───────────┐
+                  │                       │
+             Native sensor          Spatial and
+               confidence           temporal matching
+                  │                       │
+                  └───────────┬───────────┘
+                              ▼
+                      Fire Tracker
+                              │
+                     Persistent Fire Events
+                              │
+                  ┌───────────┴───────────┐
+                  │                       │
+             Detection              Tracking
+             confidence             confidence
+                  │                       │
+                  └───────────┬───────────┘
+                              ▼
+                      Feature Engineering
+                              │
+                              ▼
+                     Spread Prediction
+                              │
+                              ▼
+                       Web Dashboard
+```
+
+This means the tracker receives harmonised observations from both satellites and determines which observations belong to the same fire event.
+
+The spread model then works with those fire events rather than individual satellite detections.
+
+That is exactly what we want.
+
+## 2. What I would change in your harmonisation strategy
+
+### A. Don't automatically consider VIIRS more accurate
+
+VIIRS has substantially finer nominal spatial resolution than MODIS (375 m versus approximately 1 km for the standard MODIS active-fire product).
+
+This makes VIIRS better at resolving the location of smaller or spatially concentrated thermal anomalies.
+
+However, finer resolution does not automatically mean every VIIRS detection is more reliable. Both sensors have their own detection limitations and confidence classifications.
+
+I would therefore:
+
+- Preserve each sensor's original confidence.
+- Give VIIRS higher spatial-resolution priority when representing a matched detection.
+- Avoid treating VIIRS as universally more reliable than MODIS.
+
+### B. Dual detection should increase confidence, but not automatically guarantee it
+
+Your idea of giving the highest confidence to detections identified by both satellites is reasonable.
+
+However, the observations need to be matched carefully.
+
+For example:
+
+| MODIS | VIIRS | Suggested interpretation |
+|---|---|---|
+| Detected | Detected | Dual-sensor corroboration |
+| Not detected | High-confidence detection | VIIRS-only detection |
+| Not detected | Low-confidence detection | Lower-confidence VIIRS detection |
+| High-confidence detection | Not detected | MODIS-only detection |
+| Low-confidence detection | Not detected | Lower-confidence MODIS detection |
+
+Importantly, a MODIS detection without a corresponding VIIRS detection should **not automatically be classified as extinguished**.
+
+VIIRS might not have passed over that location, cloud cover might have interfered, or the fire might have changed between observations.
+
+Absence of a detection is not necessarily evidence of absence of a fire.
+
+### C. Don't discard MODIS coordinates after matching
+
+Your proposal to anchor dual-confirmed detections to VIIRS coordinates makes sense for dashboard visualisation.
+
+But for the model, preserve both observations.
+
+For example:
+
+```json
+{
+  "event_id": "fire_001",
+  "observations": [
+    {
+      "sensor": "MODIS",
+      "latitude": 31.50,
+      "longitude": 74.30,
+      "confidence": 85,
+      "frp": 12.5,
+      "timestamp": "..."
+    },
+    {
+      "sensor": "VIIRS",
+      "latitude": 31.501,
+      "longitude": 74.302,
+      "confidence": "h",
+      "frp": 14.2,
+      "timestamp": "..."
+    }
+  ],
+  "detection_confidence": "dual_confirmed"
+}
+```
+
+The coordinates and values above are illustrative.
+
+Why preserve both?
+
+Because the spread model might eventually benefit from knowing:
+- How many observations were recorded.
+- Which satellites detected the event.
+- How FRP changed over time.
+- Whether observations corroborated each other.
+- How frequently the fire was detected.
+
+If you replace MODIS with VIIRS completely, you lose potentially useful information.
+
+---
+
+## 3. Can the tracker identify related fires across both satellites?
+
+Yes. This is where the tracker becomes particularly useful.
+
+Consider this sequence:
+
+1. MODIS detects a thermal anomaly.
+2. VIIRS detects a nearby anomaly shortly afterwards.
+3. VIIRS detects additional hotspots the following day.
+4. MODIS detects another anomaly near the existing footprint.
+
+The tracker can associate these observations with one fire event.
+
+It should not matter whether an observation originated from MODIS or VIIRS. Both are observations of the same underlying phenomenon.
+
+However, there is one important adjustment to our existing tracker:
+
+**We need to account for the different spatial resolutions of the sensors when associating observations.**
+
+A MODIS detection represents a much larger nominal pixel footprint than a VIIRS detection.
+
+Consequently, using the same fixed point-to-point distance for both sensors can produce inappropriate associations.
+
+I'd retain the actual observation coordinates and sensor footprint information, then account for footprint size when calculating spatial overlap or proximity.
+
+Also, don't split a MODIS pixel into artificial VIIRS-sized detections. Your original reasoning is correct: that would manufacture observations that never existed.
+
+---
+
+## 4. One part I would NOT use for spread prediction: the velocity calculation
+
+Your proposed formula:
+
+\[
+\vec{v}=\frac{\vec{x}_{VIIRS}-\vec{x}_{MODIS}}{\Delta t}
+\]
+
+is mathematically valid, but its interpretation is problematic.
+
+A MODIS detection at 10:30 and a VIIRS detection at 13:30 do not necessarily represent the same fire front moving between two locations.
+
+They could be:
+- Two observations of the same stationary fire.
+- Different portions of the same fire.
+- Different hotspots within the same large event.
+- Two independent nearby fires.
+
+Therefore, calculating their coordinate difference and calling it fire-spread velocity could introduce misleading training data.
+
+For our model, we should estimate expansion using changes in the **tracked fire footprint over time**, rather than the difference between individual MODIS and VIIRS detection coordinates.
+
+That is much closer to what we want to predict.
+
+---
+
+## 5. How this connects to our three spread models
+
+Remember our planned models:
+
+| Model | What it predicts | How harmonisation helps |
+|---|---|---|
+| Model 1 | Probability that a fire persists | Multiple observations and sensor corroboration help establish event history. |
+| Model 2 | Probability that a fire expands | More complete observations help establish whether the footprint is actually growing. |
+| Model 3 | Amount of additional area if expansion occurs | A more reliable current footprint provides a better starting point for estimating additional area. |
+
+The tracker should construct the same type of fire events for both historical training data and live dashboard data.
+
+This is particularly important. If historical training uses one method of grouping detections while the dashboard uses another, the model will be trained on a different definition of a fire than the one it receives in production.
+
+## 6. My recommended final architecture
+
+I'd keep three separate concepts in the system:
+
+| Component | What it measures |
+|---|---|
+| Detection confidence | How reliable is the satellite observation? |
+| Tracking confidence | How confidently can we associate observations with the same fire event? |
+| Prediction confidence | How reliable is the model's prediction, given the available data and its validation performance? |
+
+These should never be treated as interchangeable.
+
+For example, a fire could have:
+- High detection confidence because both satellites detected it.
+- Moderate tracking confidence because it was associated with a nearby event using an uncertain spatial match.
+- Low prediction confidence because there is very little historical information about its development.
+
+That is a perfectly valid combination.
+
+---
+
+### My conclusion
+
+I would keep your MODIS–VIIRS harmonisation strategy, but make the following changes:
+
+1. Preserve native sensor confidence rather than treating VIIRS as universally more accurate.
+2. Give dual-sensor observations higher corroboration confidence.
+3. Never interpret a missing detection as proof that a fire has extinguished.
+4. Preserve both MODIS and VIIRS observations, even when using VIIRS coordinates for dashboard representation.
+5. Feed both sensors into the same fire tracker.
+6. Calculate spread from the evolution of tracked fire footprints, not differences between MODIS and VIIRS coordinates.
+7. Keep detection, tracking and prediction confidence separate.
+
+**Most importantly, we don't need two different fire-grouping systems.** The harmonisation layer prepares the observations, and the tracker groups them into fire events. Those exact same events can feed the dashboard and the spread-prediction models.
+
+And you can do all of this without a database: periodically rebuild the events from the available observation history and generate a cached JSON/GeoJSON output.
