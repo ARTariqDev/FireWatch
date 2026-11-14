@@ -12,13 +12,14 @@ const Button = ({
   text,
   onClick,
   disabled = false,
-  color = "#ff6a32",
-  textColor = "#150b06",
-  glowColor = "#ffe3d1",
-  rippleColor = "rgba(21,11,6,0.22)",
+  color = "linear-gradient(115deg, #17110e 0%, #991b1b 52%, #f97316 100%)",
+  textColor = "#ffffff",
+  glowColor = "#fb923c",
+  rippleColor = "rgba(255,255,255,0.3)",
 }) => {
   const btnRef = useRef(null);
   const glowRef = useRef(null);
+  const sheenRef = useRef(null);
   const motionRef = useRef(null);
   const isActiveRef = useRef(false);
   const nextRippleId = useRef(0);
@@ -28,7 +29,21 @@ const Button = ({
     (_, contextSafe) => {
       const button = btnRef.current;
       const glow = glowRef.current;
+      const sheen = sheenRef.current;
       if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+
+      if (sheen) {
+        gsap.set(sheen, { xPercent: -160 });
+        gsap
+          .timeline({ delay: 0.12 })
+          .to(sheen, {
+            xPercent: 160,
+            opacity: 0.75,
+            duration: 0.85,
+            ease: "power2.inOut",
+          })
+          .to(sheen, { opacity: 0, duration: 0.22 }, "-=0.16");
+      }
 
       const settle = contextSafe((active) => {
         gsap.to(button, {
@@ -108,9 +123,15 @@ const Button = ({
       onFocus={(e) => e.currentTarget.matches(":focus-visible") && setActive(true)}
       onBlur={() => setActive(false)}
       onClick={handleClick}
-      className="relative isolate inline-flex min-h-12 cursor-pointer items-center justify-center overflow-hidden rounded-lg px-7 py-3 font-semibold shadow-[0_10px_26px_rgba(255,106,50,0.2)] transition-shadow duration-300 hover:shadow-[0_12px_30px_rgba(255,106,50,0.34)] focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-orange-300 disabled:cursor-wait disabled:opacity-60 disabled:shadow-none"
+      className="relative isolate inline-flex min-h-12 cursor-pointer items-center justify-center overflow-hidden rounded-xl border border-white/15 px-7 py-3 font-semibold tracking-wide shadow-[0_8px_24px_rgba(127,29,29,0.28)] transition-shadow duration-300 ease-out hover:shadow-[0_12px_30px_rgba(234,88,12,0.35)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-orange-300 disabled:cursor-wait disabled:opacity-60 disabled:shadow-none"
       style={{ background: color }}
     >
+      <span
+        ref={sheenRef}
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-y-[-35%] left-[-35%] z-0 w-1/3 rotate-12 bg-gradient-to-r from-transparent via-white/50 to-transparent opacity-0 blur-sm"
+      />
+
       <span
         ref={glowRef}
         aria-hidden="true"

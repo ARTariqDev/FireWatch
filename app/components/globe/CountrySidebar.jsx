@@ -9,6 +9,7 @@ import { prefersReducedMotion } from "./geo";
 import HotspotRefresh from "./HotspotRefresh";
 import ViewModeSwitch from "./ViewModeSwitch";
 import TimelineControls from "./TimelineControls";
+import CountryPicker from "./CountryPicker";
 
 gsap.registerPlugin(useGSAP);
 
@@ -51,6 +52,7 @@ function HudBody({ country, timelineStats }) {
     total: stats.inside,
     active: stats.inside,
     extinguished: 0,
+    dual: stats.dual || 0,
     maxFrp: stats.maxFrp,
     modis: stats.modis,
     viirs: stats.viirs,
@@ -69,6 +71,12 @@ function HudBody({ country, timelineStats }) {
         <span>MODIS: {format(current.modis)}</span>
         <span className="metric-divider">/</span>
         <span>VIIRS: {format(current.viirs)}</span>
+        {current.dual > 0 && (
+          <>
+            <span className="metric-divider">/</span>
+            <span className="metric-dual">★ {format(current.dual)} DUAL</span>
+          </>
+        )}
         <span className="metric-pill">{current.timeLabel}</span>
       </div>
       {current.total === 0 ? (
@@ -91,7 +99,7 @@ function HudBody({ country, timelineStats }) {
 
 function CountrySidebar({
   active, open, onToggle, canExit, country, onBack, viewMode, switching, onChangeView,
-  onData, onRefreshError, onRefreshStart, onFilterChange, onQueryDate,
+  onData, onRefreshError, onRefreshStart, onFilterChange, onQueryDate, onSelectCountry,
 }) {
   const rootRef = useRef(null);
   const ready = country?.status === "ready";
@@ -185,6 +193,11 @@ function CountrySidebar({
             onData={onData}
             onError={onRefreshError}
             onRefreshStart={onRefreshStart}
+          />
+          <CountryPicker
+            currentIso3={country?.iso3}
+            onSelectCountry={onSelectCountry}
+            disabled={!canExit || switching}
           />
         </div>
         <div aria-live="polite">

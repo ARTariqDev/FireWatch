@@ -23,7 +23,7 @@ function Hero() {
   const [phase, setPhase] = useState("orbit");
   const [feed, setFeed] = useState({ status: "preview" });
   const [country, setCountry] = useState(null);
-  const [viewMode, setViewMode] = useState("3d");
+  const [viewMode, setViewMode] = useState("2d");
   const [switching, setSwitching] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
@@ -43,7 +43,7 @@ function Hero() {
     const detected = position ? await resolveCountry(position) : null;
     const target = detected ?? DEFAULT_COUNTRY;
 
-    setViewMode("3d");
+    setViewMode("2d");
     setSidebarOpen(true);
     setCountry({ status: "loading", iso3: target.iso3, name: target.name, located: Boolean(detected) });
     setPhase("flying");
@@ -123,6 +123,63 @@ function Hero() {
     globeRef.current?.updateHotspots(filteredPoints);
   }, []);
 
+  const selectCountry = useCallback(
+    async (target) => {
+      if (!target?.iso3) return;
+      if (country?.iso3 === target.iso3) return;
+
+      requestRef.current?.abort();
+      setPhase("flying");
+      setCountry({ status: "loading", iso3: target.iso3, name: target.name || target.iso3, located: false });
+
+      const controller = new AbortController();
+      requestRef.current = controller;
+      const update = (change) =>
+        setCountry((current) =>
+          !controller.signal.aborted && current?.iso3 === target.iso3 ? { ...current, ...change } : current,
+        );
+
+      const request = fetchCountryHotspots(target.iso3, controller.signal).then(
+        (data) => {
+          if (!controller.signal.aborted) update({ status: "ready", name: data.country.name, data });
+          return data;
+        },
+        () => {
+          if (!controller.signal.aborted) update({ status: "error" });
+          return null;
+        },
+      );
+
+      const bounds = fetchCountryBounds(target.iso3, controller.signal).catch((error) => {
+        if (!controller.signal.aborted) console.error("Country bounds request failed:", error);
+        return request.then((data) => data?.country?.bbox ?? null);
+      });
+
+      const focus = target.center
+        ? Array.isArray(target.center)
+          ? { lng: target.center[0], lat: target.center[1] }
+          : { lng: target.center.lng, lat: target.center.lat }
+        : { lng: 0, lat: 20 };
+
+      const arrived = await globeRef.current?.flyToCountry({
+        iso3: target.iso3,
+        focus,
+        request,
+        bounds,
+      });
+
+      if (!arrived) {
+        if (!controller.signal.aborted) {
+          controller.abort();
+          setPhase("country");
+        }
+        return;
+      }
+      setPhase("country");
+    },
+    [country?.iso3],
+  );
+
   const handleQueryDate = useCallback(
     async (options) => {
       if (!country?.iso3) return null;
@@ -182,6 +239,7 @@ function Hero() {
             onRefreshStart={cancelInitialRequest}
             onFilterChange={handleFilterChange}
             onQueryDate={handleQueryDate}
+            onSelectCountry={selectCountry}
           />
         )}
       </section>

@@ -61,3 +61,24 @@ test("toFeatureCollection preserves extinguished property for Mapbox styling", (
   assert.equal(fc.features[0].properties.extinguished, 0);
   assert.equal(fc.features[1].properties.extinguished, 1);
 });
+
+test("filters hotspots by confidence tierFilter", () => {
+  const points = [
+    // [lon, lat, frp, sensor, inside, acquired, extinguished, evidence, tier, confidence]
+    [70.0, 30.0, 80, 1, 1, NOW, 0, 3, 1, 95], // Tier 1: Dual-confirmed
+    [71.0, 31.0, 45, 1, 1, NOW, 0, 2, 2, 85], // Tier 2: VIIRS solo
+    [72.0, 32.0, 30, 0, 1, NOW, 0, 1, 3, 40], // Tier 3: MODIS solo
+  ];
+
+  const all = classifyHotspots(points, { hoursBack: 0, tierFilter: "all", referenceTime: NOW });
+  assert.equal(all.filteredPoints.length, 3);
+  assert.equal(all.stats.dual, 1);
+
+  const viirsAndDual = classifyHotspots(points, { hoursBack: 0, tierFilter: "viirs_and_dual", referenceTime: NOW });
+  assert.equal(viirsAndDual.filteredPoints.length, 2);
+  assert.ok(viirsAndDual.filteredPoints.every((p) => p[8] === 1 || p[8] === 2));
+
+  const dualOnly = classifyHotspots(points, { hoursBack: 0, tierFilter: "dual_only", referenceTime: NOW });
+  assert.equal(dualOnly.filteredPoints.length, 1);
+  assert.equal(dualOnly.filteredPoints[0][8], 1);
+});

@@ -62,6 +62,20 @@ test("thinning preserves coordinates near borders", () => {
   assert.ok(isInsideCountry(country, point[0], point[1]));
 });
 
+test("thinning preserves harmonized tier, evidence, and dual matches", () => {
+  const acquired = Date.parse("2026-11-14T12:00:00Z");
+  const match = [0, 0, 20, 0, acquired, "80", "T"];
+  const dual = [0.001, 0, 42.567, 1, 1, acquired, null, 3, 1, "h", "N20", [match]];
+  const [point] = thinToGrid([dual], 0.0001, 10);
+  assert.equal(point[2], 42.6);
+  assert.equal(point[5], acquired);
+  assert.equal(point[7], 3);
+  assert.equal(point[8], 1);
+  assert.equal(point[9], "h");
+  assert.equal(point[10], "N20");
+  assert.deepEqual(point[11], [match]);
+});
+
 test("cached outside-country points are not rendered", () => {
   const features = toFeatureCollection([
     [74.3587, 31.5204, 10, 0, 1],

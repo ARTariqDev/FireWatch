@@ -19,8 +19,9 @@ const PAGE_LOCK_CLASS = "globe-locked";
 const MAX_FRAMED_SPAN = { lng: 80, lat: 55 };
 
 export const VIEWS = {
-  "3d": { pitch: 58, bearing: -14, terrain: TERRAIN_EXAGGERATION },
   "2d": { pitch: 0, bearing: 0, terrain: 0 },
+  "3d": { pitch: 58, bearing: -14, terrain: TERRAIN_EXAGGERATION },
+  topo: { pitch: 62, bearing: -20, terrain: 3.5 },
 };
 
 const seconds = (value) => (prefersReducedMotion() ? 0.01 : value);
@@ -69,26 +70,35 @@ function countryFocus(map, bbox, fallback, view) {
 
 // Orbit -> country: swing the country to face us, then plunge in until it fills the screen.
 export async function flyToCountry(stage, { iso3, focus, request, bounds }) {
-  if (!(await stage.ready) || !["intro", "orbit"].includes(stage.mode)) return false;
+  if (!(await stage.ready) || !["intro", "orbit", "country"].includes(stage.mode)) return false;
   if (stage.mode === "intro") gsap.killTweensOf(stage.camera.state);
 
   const { map, camera, container, slot } = stage;
   const flight = Symbol("country flight");
   stage.activeFlight = flight;
+  const fromCountry = stage.mode === "country";
   stage.mode = "flight";
-  stage.viewMode = "3d";
+  stage.viewMode = stage.viewMode || "2d";
+  setInteractive(map, false);
+  if (fromCountry) {
+    syncCamera(map, camera.state);
+    stage.highlight?.pause();
+    hideCountry(map);
+  }
   setHotspots(map, []);
   document.documentElement.classList.add(PAGE_LOCK_CLASS);
 
   // Terrain is only fetched once the visitor asks for it.
   ensureTerrainSource(map);
 
-  // Promote the canvas to a viewport-sized layer without moving the globe on screen.
-  const restingCenter = slotCenter(slot);
-  container.classList.add("is-fixed");
-  map.resize();
-  Object.assign(camera.state, paddingToward(container.getBoundingClientRect(), restingCenter));
-  camera.apply();
+  if (!fromCountry) {
+    // Promote the canvas to a viewport-sized layer without moving the globe on screen.
+    const restingCenter = slotCenter(slot);
+    container.classList.add("is-fixed");
+    map.resize();
+    Object.assign(camera.state, paddingToward(container.getBoundingClientRect(), restingCenter));
+    camera.apply();
+  }
 
   const [bbox] = await Promise.all([
     bounds,
@@ -97,9 +107,9 @@ export async function flyToCountry(stage, { iso3, focus, request, bounds }) {
       {
         lng: shortestLng(camera.state.lng, focus.lng),
         lat: focus.lat,
-        zoom: camera.state.zoom + 0.55,
+        zoom: fromCountry ? Math.min(camera.state.zoom, 3.2) : camera.state.zoom + 0.55,
         ...NO_PADDING,
-        duration: seconds(0.9),
+        duration: seconds(fromCountry ? 0.8 : 0.9),
         ease: "power3.inOut",
       },
       camera.apply,
@@ -159,7 +169,7 @@ export async function setViewMode(stage, mode) {
     camera.apply,
   );
 
-  setInteractive(map, true, mode === "3d");
+  setInteractive(map, true, mode !== "2d");
   stage.mode = "country";
   return true;
 }

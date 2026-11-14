@@ -6,6 +6,7 @@ import { classifyHotspots, formatUtcTime } from "@/lib/hotspot-data";
 export default function TimelineControls({ rawPoints = [], onFiltered, onQueryDate, disabled = false }) {
   const [mode, setMode] = useState("slider"); // 'slider' | 'interval'
   const [hoursBack, setHoursBack] = useState(0);
+  const [confidenceLevel, setConfidenceLevel] = useState(2); // 0: All, 1: Moderate+, 2: VIIRS+Dual (Default), 3: High+Dual, 4: Dual only
   const [loading, setLoading] = useState(false);
   const [sliderTimeLabel, setSliderTimeLabel] = useState("CURRENT DETECTIONS");
 
@@ -24,18 +25,35 @@ export default function TimelineControls({ rawPoints = [], onFiltered, onQueryDa
   const [intervalForm, setIntervalForm] = useState(defaults);
   const [activeInterval, setActiveInterval] = useState(null);
 
-  // Re-classify points whenever rawPoints, hoursBack, or activeInterval changes
+  const tierFilter = useMemo(() => {
+    switch (confidenceLevel) {
+      case 0:
+        return "all";
+      case 1:
+        return "moderate_plus";
+      case 2:
+        return "viirs_and_dual";
+      case 3:
+        return "high_and_dual";
+      case 4:
+        return "dual_only";
+      default:
+        return "viirs_and_dual";
+    }
+  }, [confidenceLevel]);
+
+  // Re-classify points whenever rawPoints, hoursBack, activeInterval, or confidenceLevel changes
   useEffect(() => {
     if (!rawPoints || !rawPoints.length) return;
 
     if (mode === "slider") {
-      const result = classifyHotspots(rawPoints, { hoursBack });
+      const result = classifyHotspots(rawPoints, { hoursBack, tierFilter });
       onFiltered?.(result.filteredPoints, result.stats);
     } else if (mode === "interval" && activeInterval) {
-      const result = classifyHotspots(rawPoints, { interval: activeInterval });
+      const result = classifyHotspots(rawPoints, { interval: activeInterval, tierFilter });
       onFiltered?.(result.filteredPoints, result.stats);
     }
-  }, [rawPoints, hoursBack, mode, activeInterval, onFiltered]);
+  }, [rawPoints, hoursBack, mode, activeInterval, tierFilter, onFiltered]);
 
   // Handle slider scrub
   const handleSliderChange = (e) => {
@@ -44,17 +62,23 @@ export default function TimelineControls({ rawPoints = [], onFiltered, onQueryDa
     if (value === 0) {
       setSliderTimeLabel("CURRENT DETECTIONS");
     } else {
-      setSliderTimeLabel(formatUtcTime(Date.now() - value * 3600 * 1000));
+      let latestTime = 0;
+      for (const p of rawPoints) {
+        if (typeof p[5] === "number" && p[5] > latestTime) latestTime = p[5];
+      }
+      const ref = latestTime || Date.now();
+      setSliderTimeLabel(formatUtcTime(ref - value * 3600 * 1000));
     }
   };
 
-  // Reset back to live
+  // Reset back to live default
   const handleResetLive = useCallback(() => {
     setHoursBack(0);
+    setConfidenceLevel(2);
     setSliderTimeLabel("CURRENT DETECTIONS");
     setActiveInterval(null);
     setMode("slider");
-    const result = classifyHotspots(rawPoints, { hoursBack: 0 });
+    const result = classifyHotspots(rawPoints, { hoursBack: 0, tierFilter: "viirs_and_dual" });
     onFiltered?.(result.filteredPoints, result.stats);
   }, [rawPoints, onFiltered]);
 
@@ -82,14 +106,14 @@ export default function TimelineControls({ rawPoints = [], onFiltered, onQueryDa
       try {
         const data = await onQueryDate({ date: startDate, dayRange: spanDays });
         if (data?.points) {
-          const result = classifyHotspots(data.points, { interval });
+          const result = classifyHotspots(data.points, { interval, tierFilter });
           onFiltered?.(result.filteredPoints, result.stats);
         }
       } finally {
         setLoading(false);
       }
     } else {
-      const result = classifyHotspots(rawPoints, { interval });
+      const result = classifyHotspots(rawPoints, { interval, tierFilter });
       onFiltered?.(result.filteredPoints, result.stats);
     }
   };
@@ -110,7 +134,16 @@ export default function TimelineControls({ rawPoints = [], onFiltered, onQueryDa
     setActiveInterval({ startMs, endMs });
   };
 
-  const isLive = mode === "slider" && hoursBack === 0;
+  const isLive = mode === "slider" && hoursBack === 0 && confidenceLevel === 2;
+
+  const confidenceLabels = ["ALL", "MODERATE+", "VIIRS+DUAL", "HIGH+DUAL", "DUAL ONLY"];
+  const confidenceDescriptions = [
+    "All sensors — MODIS solo + VIIRS solo + dual-confirmed. Includes low-confidence/coarse detections.",
+    "Moderate+ — excludes low-confidence MODIS (<50%) and low-confidence VIIRS.",
+    "Default operational view — high-resolution VIIRS 375m + dual-confirmed detections.",
+    "High confidence only — nominal/low filtered out. Only VIIRS High (H), MODIS ≥80%, and dual-confirmed.",
+    "Dual-confirmed only — coincident multi-satellite cross-validation (MODIS + VIIRS within 1 km and ±4 h).",
+  ];
 
   return (
     <div className="timeline-section" aria-label="Thermal Timeline Controls">
@@ -121,6 +154,38 @@ export default function TimelineControls({ rawPoints = [], onFiltered, onQueryDa
             ↺ LIVE
           </button>
         )}
+      </div>
+
+      <div className="confidence-control">
+        <div className="confidence-header">
+          <span className="confidence-title">CONFIDENCE FILTER</span>
+          <span className="confidence-badge">
+            {confidenceLabels[confidenceLevel]}
+          </span>
+        </div>
+        <div className="confidence-slider-wrap">
+          <input
+            type="range"
+            min="0"
+            max="4"
+            step="1"
+            value={confidenceLevel}
+            onChange={(e) => setConfidenceLevel(parseInt(e.target.value, 10))}
+            disabled={disabled || loading}
+            className="confidence-slider"
+            aria-label="Confidence filter tier"
+          />
+          <div className="confidence-slider-ticks" aria-hidden="true">
+            <span>ALL</span>
+            <span>MOD+</span>
+            <span>VIIRS+DUAL</span>
+            <span>HIGH+</span>
+            <span>DUAL</span>
+          </div>
+        </div>
+        <p className="confidence-desc">
+          {confidenceDescriptions[confidenceLevel]}
+        </p>
       </div>
 
       <div className="timeline-tabs" role="tablist">
@@ -173,17 +238,6 @@ export default function TimelineControls({ rawPoints = [], onFiltered, onQueryDa
               <span>-12h</span>
               <span>-18h</span>
               <span>-24h</span>
-            </div>
-          </div>
-
-          <div className="timeline-legend">
-            <div className="timeline-legend-item">
-              <span className="dot dot-active" aria-hidden="true" />
-              <span>ACTIVE</span>
-            </div>
-            <div className="timeline-legend-item">
-              <span className="dot dot-extinguished" aria-hidden="true" />
-              <span>PUT OUT / INACTIVE</span>
             </div>
           </div>
         </div>
@@ -251,6 +305,25 @@ export default function TimelineControls({ rawPoints = [], onFiltered, onQueryDa
           </div>
         </form>
       )}
+
+      <div className="timeline-legend" aria-label="Confidence Tier Legend">
+        <div className="timeline-legend-item" title="Dual-Confirmed: Both MODIS + VIIRS saw this fire within 4 hours (95–100% confidence)">
+          <span className="dot dot-dual" aria-hidden="true" />
+          <span>DUAL <span className="legend-pct">95–100%</span></span>
+        </div>
+        <div className="timeline-legend-item" title="VIIRS Solo: High-resolution 375m active detection (75–90% confidence)">
+          <span className="dot dot-viirs" aria-hidden="true" />
+          <span>VIIRS <span className="legend-pct">75–90%</span></span>
+        </div>
+        <div className="timeline-legend-item" title="MODIS Solo: 1km coarse detection, unconfirmed by VIIRS (30–55% confidence)">
+          <span className="dot dot-modis" aria-hidden="true" />
+          <span>MODIS <span className="legend-pct">30–55%</span></span>
+        </div>
+        <div className="timeline-legend-item" title="Put Out / Inactive: No thermal signal in the latest satellite pass">
+          <span className="dot dot-extinguished" aria-hidden="true" />
+          <span>PUT OUT</span>
+        </div>
+      </div>
     </div>
   );
 }

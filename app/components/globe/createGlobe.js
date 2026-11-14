@@ -1,4 +1,3 @@
-import "mapbox-gl/dist/mapbox-gl.css";
 import gsap from "gsap";
 import { ORBIT_LAT, createCamera, orbitLayout, setInteractive } from "./camera";
 import { MAPBOX_TOKEN, prefersReducedMotion } from "./geo";

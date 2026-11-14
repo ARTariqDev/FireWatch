@@ -80,8 +80,8 @@ test("the country becomes interactive before a slow hotspot response", { timeout
     iso3: "PAK", focus: { lng: 69, lat: 30 }, bounds: Promise.resolve([60, 23, 78, 38]), request: request.promise,
   }), true);
   assert.equal(stage.mode, "country");
-  assert.equal(stage.viewMode, "3d");
-  assert.equal(stage.camera.state.pitch, 58);
+  assert.equal(stage.viewMode, "2d");
+  assert.equal(stage.camera.state.pitch, 0);
   assert.equal(stage.sources.get("hotspots").data.features.length, 0);
 
   request.resolve(data);
@@ -135,4 +135,37 @@ test("a late hotspot response cannot overwrite the returned preview", async () =
   assert.equal(stage.mode, "orbit");
   assert.strictEqual(stage.sources.get("hotspots").data, preview);
   assert.notDeepEqual(preview.features[0].geometry.coordinates, [0.5, 0.5]);
+});
+
+test("supports seamless country-to-country flight transition", async () => {
+  const stage = makeStage();
+  // Fly to country 1 (Pakistan)
+  const ok1 = await flyToCountry(stage, {
+    iso3: "PAK",
+    focus: { lng: 69, lat: 30 },
+    bounds: Promise.resolve([60, 23, 78, 38]),
+    request: Promise.resolve(data),
+  });
+  assert.equal(ok1, true);
+  assert.equal(stage.mode, "country");
+
+  // Fly directly to country 2 (Australia) from country mode
+  const dataAus = {
+    country: {
+      iso3: "AUS",
+      geometry: { type: "Polygon", coordinates: [[[130, -25], [131, -25], [131, -24], [130, -25]]] },
+    },
+    points: [[130.5, -25.2, 55, 1, 1]],
+  };
+
+  const ok2 = await flyToCountry(stage, {
+    iso3: "AUS",
+    focus: { lng: 133.7, lat: -25.2 },
+    bounds: Promise.resolve([113, -44, 154, -10]),
+    request: Promise.resolve(dataAus),
+  });
+  assert.equal(ok2, true);
+  assert.equal(stage.mode, "country");
+  assert.equal(stage.sources.get("hotspots").data.features[0].geometry.coordinates[0], 130.5);
+  stage.highlight?.pause();
 });

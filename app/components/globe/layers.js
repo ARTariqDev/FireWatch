@@ -8,10 +8,22 @@ const PULSE_SHARE = 0.1;
 const NO_COUNTRY = ["==", ["get", "iso_3166_1_alpha_3"], ""];
 const WORLDVIEW = ["any", ["==", ["get", "worldview"], "all"], ["in", "US", ["get", "worldview"]]];
 
-// Heat ramp: red embers -> orange -> pale-hot cores, driven by fire radiative power (MW).
+// Heat ramp for Dual-Confirmed (Highest Confidence, Tier 1)
+const DUAL_CORE_COLOR = [
+  "interpolate", ["linear"], ["get", "frp"],
+  0, "#ffe082", 20, "#fff59d", 80, "#fffde7", 200, "#ffffff",
+];
+
+// Heat ramp for VIIRS Solo (Tier 2, High/Nominal Confidence)
 const FRP_COLOR = [
   "interpolate", ["linear"], ["get", "frp"],
   0, "#d3321d", 15, "#ff6a32", 60, "#ffb347", 200, "#fff1c9",
+];
+
+// Heat ramp for MODIS Solo (Tier 3, Lower Confidence / Unverified)
+const MODIS_LOW_CORE_COLOR = [
+  "interpolate", ["linear"], ["get", "frp"],
+  0, "#b45309", 20, "#d97706", 80, "#f59e0b", 200, "#fde68a",
 ];
 
 // Lighter, muted shade for extinguished / put-out fires
@@ -24,6 +36,10 @@ const CORE_COLOR = [
   "case",
   ["==", ["get", "extinguished"], 1],
   EXTINGUISHED_CORE_COLOR,
+  ["==", ["get", "tier"], 1],
+  DUAL_CORE_COLOR,
+  ["==", ["get", "tier"], 3],
+  MODIS_LOW_CORE_COLOR,
   FRP_COLOR,
 ];
 
@@ -31,6 +47,10 @@ const GLOW_COLOR = [
   "case",
   ["==", ["get", "extinguished"], 1],
   "#cfa08c",
+  ["==", ["get", "tier"], 1],
+  "#ff9100",
+  ["==", ["get", "tier"], 3],
+  "#b45309",
   FRP_COLOR,
 ];
 
@@ -40,7 +60,7 @@ export function toFeatureCollection(points) {
     type: "FeatureCollection",
     features: points
       .filter((point) => (point[4] ?? 1) === 1)
-      .map(([lng, lat, frp, sensor, inside = 1, acquired, extinguished = 0]) => ({
+      .map(([lng, lat, frp, sensor, inside = 1, acquired, extinguished = 0, evidence = 0, tier = 2, confidence = null, satellite = null, matches = []]) => ({
         type: "Feature",
         geometry: { type: "Point", coordinates: [lng, lat] },
         properties: {
@@ -49,20 +69,31 @@ export function toFeatureCollection(points) {
           in: inside,
           acquired,
           extinguished: Number(extinguished) || 0,
+          evidence: Number(evidence) || 0,
+          tier: Number(tier) || 2,
+          confidence,
+          satellite,
+          matchesCount: Array.isArray(matches) ? matches.length : 0,
         },
       })),
   };
 }
 
 // Pulse only the brightest slice of whatever is on screen, so quiet countries still get rings.
-// Extinguished fires never pulse.
+// Extinguished fires and low-confidence MODIS-only fires never pulse.
 function pulseFilter(points) {
   const brightness = points
-    .filter((point) => (point[4] ?? 1) === 1 && (point[6] ?? 0) !== 1)
+    .filter((point) => (point[4] ?? 1) === 1 && (point[6] ?? 0) !== 1 && (point[8] ?? 2) !== 3)
     .map((point) => point[2])
     .sort((a, b) => a - b);
   const cutoff = brightness.length ? brightness[Math.floor(brightness.length * (1 - PULSE_SHARE))] : 0;
-  return ["all", [">=", ["get", "frp"], cutoff], ["==", ["get", "in"], 1], ["!=", ["get", "extinguished"], 1]];
+  return [
+    "all",
+    [">=", ["get", "frp"], cutoff],
+    ["==", ["get", "in"], 1],
+    ["!=", ["get", "extinguished"], 1],
+    ["!=", ["get", "tier"], 3],
+  ];
 }
 
 export function setHotspots(map, points) {
@@ -163,6 +194,8 @@ export function addHotspotLayers(map) {
         "case",
         ["==", ["get", "extinguished"], 1],
         0.55,
+        ["==", ["get", "tier"], 3],
+        0.75,
         1,
       ],
       "circle-radius": ["interpolate", ["linear"], ["zoom"], 1, 1.5, 5, 2.8, 9, 5],

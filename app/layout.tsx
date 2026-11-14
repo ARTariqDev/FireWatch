@@ -35,6 +35,9 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} ${instrumentSerif.variable} h-full antialiased`}
     >
+      <head>
+        <link rel="stylesheet" href="/mapbox-gl.css" />
+      </head>
       <body className="min-h-full flex flex-col">{children}</body>
     </html>
   );
