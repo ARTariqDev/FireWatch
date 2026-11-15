@@ -37,8 +37,9 @@ MODIS). The tracker groups hotspots that belong together into **fire events**.
 
 - The tracker only uses what came *before* each pass (it never looks into the future), so it behaves the same
   live as it did in training.
-- It treats every satellite the same way. Mixing in MODIS (bigger pixels) makes fires look larger and changes
-  grouping, area, duration and FRP.
+- The tracker groups detections from both sensors. Before detections are sent to the tracker, MODIS and
+  VIIRS FRP values are normalized to a common scale. MODIS's larger pixels can still change grouping, detected
+  area and duration when the sensors are combined.
 - Fire IDs (`fire_final`) are only valid within one tracking run.
 
 ### 1.1 Using the tracker from the frontend
@@ -50,11 +51,13 @@ The backend never downloads satellite data. The frontend fetches FIRMS hotspots,
 
 | Purpose | Send | Use the result for |
 |---|---|---|
-| **A. Fire map** | VIIRS + MODIS hotspots together | Drawing fires on the map |
-| **B. Analysis** | VIIRS-only hotspots (NOAA-20, Suomi-NPP) | `/calculate_hazard`, `/predict_event`, `/predict_all` |
+| **A. Map and predictions** | VIIRS + MODIS hotspots, with FRP normalized to a common scale before tracking | Drawing fires on the map and `/predict_event`, `/predict_all` |
+| **B. Hazard analysis** | VIIRS-only hotspots (NOAA-20, Suomi-NPP) | `/calculate_hazard` |
 
-The models were trained on VIIRS only, so hazard and predictions must use the fires from call B. Fire IDs
-differ between the two calls; the backend does not match fires across calls.
+The prediction models were trained using both MODIS and VIIRS data, with FRP normalized to a common scale
+before the hotspots were sent to the clustering algorithm. Use the same preprocessing and mixed-sensor input
+approach for predictions. The hazard methodology retains its separate VIIRS-only input workflow. Fire IDs
+differ between the two tracking runs; the backend does not match fires across runs.
 
 **Request**
 
@@ -82,8 +85,9 @@ differ between the two calls; the backend does not match fires across calls.
   | `MODIS` | `Aqua` / `A` | `MODIS_AQUA` |
 
 - **Other FIRMS columns** (e.g. `bright_ti4`, `scan`) are optional. They are kept and returned with each detection.
-- **Send FIRMS values unchanged.** VIIRS confidence is `l`/`n`/`h`, and `l` (low) is removed by the tracker.
-  MODIS confidence is a number and is kept as it is.
+- **Normalize FRP before tracking.** MODIS and VIIRS FRP values are brought to a common scale before the
+  hotspots are sent to the clustering algorithm. VIIRS confidence is `l`/`n`/`h`, and `l` (low) is removed by
+  the tracker. MODIS confidence is a number and is kept as it is.
 - **`mask`:** use `"deployment"` for live data. It removes known permanent heat sources (factories, flares,
   kilns). `null` uses the evaluation mask from training.
 
@@ -98,23 +102,6 @@ differ between the two calls; the backend does not match fires across calls.
 
 See section 4.1 for every field.
 
-**Example (Next.js)**
-
-```js
-const base = process.env.FIRE_API_URL;
-const post = (path, body) => fetch(`${base}${path}`, { method: "POST",
-  headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(r => r.json());
-
-// A. map: all satellites
-const mapRun = await post("/track_fires", { hotspots: [...viirsHotspots, ...modisHotspots], mask: "deployment" });
-map.addSource("fires", { type: "geojson", data: mapRun.geojson });
-
-// B. analysis: VIIRS only
-const viirsRun = await post("/track_fires", { hotspots: viirsHotspots, mask: "deployment" });
-const context = viirsRun.fire_events.flatMap(e => e.detections.map(({ lat, lon, pass_id }) => ({ lat, lon, pass_id })));
-const predictions = await post("/predict_all", { fire_events: viirsRun.fire_events, context_detections: context });
-const hazard = await post("/calculate_hazard", { fire_event: viirsRun.fire_events[0] });
-```
 
 **Practical tips**
 
@@ -184,7 +171,11 @@ surroundings. It does **not** consider people, buildings or roads.
 One example = **one tracked fire at one 12-hour satellite pass** (a "snapshot"). Its features use only
 information available at that moment. The answer ("label") is what happened in the **next 12–24 hours**.
 
-- **Data:** Pakistan fires 2019–2025 from VIIRS on NOAA-20 and Suomi-NPP, giving **464,791 snapshots**.
+- **Data:** Pakistan fires 2019–2025 from MODIS and VIIRS. FRP values were normalized to a common scale
+  before detections were sent to the clustering algorithm. The updated snapshot count is not stated here.
+- **Evaluation note:** the performance figures below come from the evaluation reports named at the top of this
+  document. They should not be treated as scores for the updated mixed-sensor models unless those reports were
+  regenerated using the updated training and test pipeline.
 - **Features (inputs):**
   - fire size, FRP and number of hotspots;
   - growth over the last 24 h;
@@ -220,7 +211,6 @@ to the *base rate* (how common the event is): a model that guesses randomly scor
 
 - **Type:** gradient boosting (scikit-learn `HistGradientBoostingClassifier`, 41 features), followed by
   calibration so that "0.3" really means about a 30% chance.
-- **Training data:** 289,788 development snapshots, of which 29,313 persisted.
 - **Cloud cover:** removed as a feature, because NASA does not provide it for live dates.
 - **2025 test:**
   - PR-AUC **0.488**, versus a base rate of **0.112**: about 4× better than guessing.
@@ -446,17 +436,14 @@ validation problems are returned with HTTP 200 inside `metadata`, as described a
 ## 5. Limitations
 
 1. **Pakistan, 2019–2025 only.** Performance elsewhere or in future years is uncertain.
-2. **Trained on VIIRS (NOAA-20 + Suomi-NPP), not MODIS.** Use **VIIRS-only** tracked fires for hazard and
-   predictions.
-3. **MODIS has bigger pixels (1 km).** Including it changes grouping, area, duration and FRP.
-4. **Satellites only look a few times a day.** Activity between passes is not seen.
-5. **A tracked "fire" may not be one real fire.** Nearby separate burns can be joined, and one fire can be split.
-6. **Clouds, smoke and data gaps** hide fires, so all outputs depend on what the satellite could see.
-7. **Predictions are estimates, not certainties.** Expansion alerts are wrong more often than right.
-8. **Coarse environmental data:**
+2. **Satellites only look a few times a day.** Activity between passes is not seen.
+3. **A tracked "fire" may not be one real fire.** Nearby separate burns can be joined, and one fire can be split.
+4. **Clouds, smoke and data gaps** hide fires, so all outputs depend on what the satellite could see.
+5. **Predictions are estimates, not certainties.** Expansion alerts are wrong more often than right.
+6. **Coarse environmental data:**
    - weather is about 50 km per grid cell, daily, and a few days late;
    - land cover and terrain are static maps at about 370 m.
-9. **Expansion is rare:** only about 0.4% of snapshots. This limits how well it can be learned.
-10. **Hazard is relative.** It ranks fires against 2019–2024 Pakistan fires. It is not a probability and says
+7. **Expansion is rare:** only about 0.4% of snapshots. This limits how well it can be learned.
+8. **Hazard is relative.** It ranks fires against 2019–2024 Pakistan fires. It is not a probability and says
     nothing about exposure of people or property.
-11. **NOAA-21** (same VIIRS instrument) was not in the training data.
+9. **NOAA-21** (same VIIRS instrument) was not in the training data.
