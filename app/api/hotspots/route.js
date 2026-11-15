@@ -8,7 +8,7 @@ async function respond(request, refresh) {
   const date = request.nextUrl.searchParams.get("date");
   const dayRange = request.nextUrl.searchParams.get("dayRange");
   const validDate = date && /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : null;
-  const numDays = dayRange && Number(dayRange) >= 1 && Number(dayRange) <= 5 ? Number(dayRange) : undefined;
+  const numDays = dayRange && Number(dayRange) >= 1 && Number(dayRange) <= 14 ? Number(dayRange) : undefined;
 
   const isForce = refresh || request.nextUrl.searchParams.get("refresh") === "true";
 

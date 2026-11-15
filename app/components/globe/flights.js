@@ -10,7 +10,7 @@ import {
   syncCamera,
 } from "./camera.js";
 import { prefersReducedMotion, shortestLng } from "./geo.js";
-import { ensureCountryLayers, hideCountry, setHotspots, showCountry } from "./layers.js";
+import { ensureCountryLayers, hideCountry, setHotspots, setTrackerOverlay, showCountry } from "./layers.js";
 import { PREVIEW_POINTS } from "./previewPoints.js";
 import { ensureTerrainSource, TERRAIN_EXAGGERATION } from "./terrain.js";
 
@@ -85,6 +85,7 @@ export async function flyToCountry(stage, { iso3, focus, request, bounds }) {
     hideCountry(map);
   }
   setHotspots(map, []);
+  setTrackerOverlay(map, {});
   document.documentElement.classList.add(PAGE_LOCK_CLASS);
 
   // Terrain is only fetched once the visitor asks for it.
@@ -124,6 +125,10 @@ export async function flyToCountry(stage, { iso3, focus, request, bounds }) {
     ensureCountryLayers(map, data.country);
     stage.highlight = showCountry(map, iso3);
     setHotspots(map, data.points);
+    setTrackerOverlay(map, {
+      trackedGeoJson: data.tabs?.combined?.geojson || data.eventsGeoJson,
+      activeTab: "combined",
+    });
   });
 
   const view = VIEWS[stage.viewMode];
@@ -188,6 +193,7 @@ export async function returnToOrbit(stage) {
   stage.highlight?.pause();
   hideCountry(map);
   setHotspots(map, []);
+  setTrackerOverlay(map, {});
 
   const layout = orbitLayout(container, slot);
   await tween(

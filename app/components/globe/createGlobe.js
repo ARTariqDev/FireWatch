@@ -1,10 +1,18 @@
 import gsap from "gsap";
-import { ORBIT_LAT, createCamera, orbitLayout, setInteractive } from "./camera";
+import { ORBIT_LAT, createCamera, fitPadding, orbitLayout, setInteractive, syncCamera } from "./camera";
 import { MAPBOX_TOKEN, prefersReducedMotion } from "./geo";
-import { addHotspotLayers, ensureCountryLayers, setHotspots, showCountry, startPulse } from "./layers";
+import { bindHotspotInteractions } from "./hotspotInteractions";
+import {
+  addHotspotLayers,
+  ensureCountryLayers,
+  setHotspots,
+  setTrackerOverlay,
+  showCountry,
+  startPulse,
+} from "./layers";
 import { MAP_STYLE, monitorMapErrors } from "./mapErrors";
 import { PREVIEW_POINTS } from "./previewPoints";
-import { flyToCountry, returnToOrbit, setViewMode } from "./flights";
+import { flyToCountry, framePadding, returnToOrbit, setViewMode } from "./flights";
 
 const START_LNG = 62;
 const SPIN_DEGREES_PER_MS = 0.005;
@@ -17,7 +25,7 @@ const FOG = {
 };
 
 // Builds the Mapbox globe and returns a small controller. Modes: boot -> intro -> orbit <-> flight/country.
-export function createGlobe({ mapboxgl, container, slot, onFeed }) {
+export function createGlobe({ mapboxgl, container, slot, onFeed, onSelectFire, onHoverFire }) {
   // Phones and tablets get cheaper rendering: no antialiasing and ~30 fps for the idle animation.
   const compact = window.matchMedia("(max-width: 1000px), (pointer: coarse)").matches;
   const minFrameMs = compact ? 33 : 0;
@@ -29,7 +37,7 @@ export function createGlobe({ mapboxgl, container, slot, onFeed }) {
     projection: "globe",
     center: [START_LNG, ORBIT_LAT],
     zoom: 0.5,
-    maxZoom: 9,
+    maxZoom: 16,
     maxPitch: 72,
     antialias: !compact,
     fadeDuration: 0,
@@ -39,6 +47,7 @@ export function createGlobe({ mapboxgl, container, slot, onFeed }) {
   const camera = createCamera(map);
   let visible = true;
   let markReady;
+  let unbindInteractions = null;
   const stage = {
     map,
     camera,
@@ -49,6 +58,8 @@ export function createGlobe({ mapboxgl, container, slot, onFeed }) {
     pulse: null,
     highlight: null,
     activeFlight: null,
+    onSelectFire,
+    onHoverFire,
     ready: new Promise((resolve) => (markReady = resolve)),
   };
 
@@ -98,6 +109,10 @@ export function createGlobe({ mapboxgl, container, slot, onFeed }) {
     addHotspotLayers(map);
     setHotspots(map, PREVIEW_POINTS);
     stage.pulse = startPulse(map, minFrameMs || 40);
+    unbindInteractions = bindHotspotInteractions(map, {
+      onSelectFire: (hit) => stage.onSelectFire?.(hit),
+      onHoverFire: (hit) => stage.onHoverFire?.(hit),
+    });
     startIntro();
   });
 
@@ -127,6 +142,9 @@ export function createGlobe({ mapboxgl, container, slot, onFeed }) {
     fly: (options) => flyToCountry(stage, options),
     back: () => returnToOrbit(stage),
     setView: (mode) => setViewMode(stage, mode),
+    setOnSelectFire(handler) {
+      stage.onSelectFire = handler;
+    },
     updateHotspots(points, country) {
       if (stage.mode !== "country" && !(stage.mode === "flight" && stage.activeFlight)) return;
       if (country?.geometry) {
@@ -135,9 +153,67 @@ export function createGlobe({ mapboxgl, container, slot, onFeed }) {
       }
       setHotspots(map, points);
     },
+    updateTrackerOverlay(overlay) {
+      if (stage.mode !== "country" && !(stage.mode === "flight" && stage.activeFlight)) return;
+      setTrackerOverlay(map, overlay);
+    },
+    focusFire({ lng, lat, zoom, areaKm2 } = {}) {
+      if (stage.mode !== "country" || !Number.isFinite(lng) || !Number.isFinite(lat)) return;
+      const numericArea = Number(areaKm2);
+      const targetZoom = Number.isFinite(zoom)
+        ? zoom
+        : numericArea > 10
+          ? 11.0
+          : numericArea >= 2
+            ? 11.8
+            : 12.5;
+      const basePad = framePadding();
+      const { width, height } = map.getContainer().getBoundingClientRect();
+      const padding = fitPadding(
+        {
+          ...basePad,
+          right: window.innerWidth > 1120 ? Math.max(basePad.right, 340) : basePad.right,
+        },
+        width,
+        height,
+      ) || basePad;
+
+      map.once("moveend", () => syncCamera(map, camera.state));
+      map.easeTo({
+        center: [lng, lat],
+        zoom: targetZoom,
+        padding,
+        duration: prefersReducedMotion() ? 10 : 750,
+      });
+    },
+    resetCountryView(bbox) {
+      if (stage.mode !== "country" || !Array.isArray(bbox) || bbox.length !== 4) return;
+      const basePad = framePadding();
+      const { width, height } = map.getContainer().getBoundingClientRect();
+      const padding = fitPadding(basePad, width, height) || basePad;
+      const framed = map.cameraForBounds(
+        [
+          [bbox[0], bbox[1]],
+          [bbox[2], bbox[3]],
+        ],
+        { padding, maxZoom: 7 },
+      );
+      if (!framed) return;
+      const center = Array.isArray(framed.center)
+        ? framed.center
+        : [framed.center.lng, framed.center.lat];
+      map.once("moveend", () => syncCamera(map, camera.state));
+      map.easeTo({
+        center,
+        zoom: framed.zoom + (map.getPitch() > 5 ? 0.3 : 0),
+        padding: { left: 0, right: 0, top: 0, bottom: 0 },
+        duration: prefersReducedMotion() ? 10 : 750,
+      });
+    },
     destroy() {
       stage.activeFlight = null;
       markReady(false);
+      unbindInteractions?.();
       gsap.ticker.remove(spin);
       gsap.killTweensOf(camera.state);
       window.removeEventListener("resize", relayout);

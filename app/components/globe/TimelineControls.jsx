@@ -3,17 +3,23 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { classifyHotspots, formatUtcTime } from "@/lib/hotspot-data";
 
-export default function TimelineControls({ rawPoints = [], onFiltered, onQueryDate, disabled = false }) {
+export default function TimelineControls({
+  rawPoints = [],
+  activeTab = "combined",
+  onFiltered,
+  onQueryDate,
+  disabled = false,
+}) {
   const [mode, setMode] = useState("slider"); // 'slider' | 'interval'
   const [hoursBack, setHoursBack] = useState(0);
-  const [confidenceLevel, setConfidenceLevel] = useState(2); // 0: All, 1: Moderate+, 2: VIIRS+Dual (Default), 3: High+Dual, 4: Dual only
+  const [confidenceLevel, setConfidenceLevel] = useState(0); // 0: All, 1: Moderate+, 2: VIIRS+Dual, 3: High+Dual, 4: Dual only
   const [loading, setLoading] = useState(false);
-  const [sliderTimeLabel, setSliderTimeLabel] = useState("CURRENT DETECTIONS");
+  const [sliderTimeLabel, setSliderTimeLabel] = useState("WITHIN 12H OF DETECTION");
 
-  // Default dates for custom interval
+  // Default dates for custom interval (last 14 days for tracker)
   const defaults = useMemo(() => {
     const end = new Date();
-    const start = new Date(end.getTime() - 24 * 3600 * 1000);
+    const start = new Date(end.getTime() - 14 * 24 * 3600 * 1000);
     return {
       startDate: start.toISOString().slice(0, 10),
       startTime: start.toISOString().slice(11, 16),
@@ -26,6 +32,7 @@ export default function TimelineControls({ rawPoints = [], onFiltered, onQueryDa
   const [activeInterval, setActiveInterval] = useState(null);
 
   const tierFilter = useMemo(() => {
+    if (activeTab !== "combined") return "all";
     switch (confidenceLevel) {
       case 0:
         return "all";
@@ -38,19 +45,21 @@ export default function TimelineControls({ rawPoints = [], onFiltered, onQueryDa
       case 4:
         return "dual_only";
       default:
-        return "viirs_and_dual";
+        return "all";
     }
-  }, [confidenceLevel]);
+  }, [activeTab, confidenceLevel]);
 
-  // Re-classify points whenever rawPoints, hoursBack, activeInterval, or confidenceLevel changes
+  // Re-classify points whenever rawPoints, activeTab, hoursBack, activeInterval, or confidenceLevel changes
   useEffect(() => {
-    if (!rawPoints || !rawPoints.length) return;
-
     if (mode === "slider") {
-      const result = classifyHotspots(rawPoints, { hoursBack, tierFilter });
+      const result = classifyHotspots(rawPoints, { hoursBack, tierFilter, windowHours: 12 });
       onFiltered?.(result.filteredPoints, result.stats);
     } else if (mode === "interval" && activeInterval) {
-      const result = classifyHotspots(rawPoints, { interval: activeInterval, tierFilter });
+      const result = classifyHotspots(rawPoints, {
+        interval: activeInterval,
+        tierFilter,
+        windowHours: 12,
+      });
       onFiltered?.(result.filteredPoints, result.stats);
     }
   }, [rawPoints, hoursBack, mode, activeInterval, tierFilter, onFiltered]);
@@ -60,7 +69,7 @@ export default function TimelineControls({ rawPoints = [], onFiltered, onQueryDa
     const value = parseFloat(e.target.value);
     setHoursBack(value);
     if (value === 0) {
-      setSliderTimeLabel("CURRENT DETECTIONS");
+      setSliderTimeLabel("WITHIN 12H OF DETECTION");
     } else {
       let latestTime = 0;
       for (const p of rawPoints) {
@@ -74,11 +83,15 @@ export default function TimelineControls({ rawPoints = [], onFiltered, onQueryDa
   // Reset back to live default
   const handleResetLive = useCallback(() => {
     setHoursBack(0);
-    setConfidenceLevel(2);
-    setSliderTimeLabel("CURRENT DETECTIONS");
+    setConfidenceLevel(0);
+    setSliderTimeLabel("WITHIN 12H OF DETECTION");
     setActiveInterval(null);
     setMode("slider");
-    const result = classifyHotspots(rawPoints, { hoursBack: 0, tierFilter: "viirs_and_dual" });
+    const result = classifyHotspots(rawPoints, {
+      hoursBack: 0,
+      tierFilter: "all",
+      windowHours: 12,
+    });
     onFiltered?.(result.filteredPoints, result.stats);
   }, [rawPoints, onFiltered]);
 
@@ -98,27 +111,33 @@ export default function TimelineControls({ rawPoints = [], onFiltered, onQueryDa
     const interval = { startMs, endMs };
     setActiveInterval(interval);
 
-    // If loaded rawPoints do not cover this interval, fetch historical points
     const hasLocal = rawPoints.some((p) => p[5] >= startMs && p[5] <= endMs);
     if (!hasLocal && onQueryDate) {
       setLoading(true);
-      const spanDays = Math.max(1, Math.min(5, Math.ceil((endMs - startMs) / (24 * 3600 * 1000)) || 1));
+      const spanDays = Math.max(
+        1,
+        Math.min(14, Math.ceil((endMs - startMs) / (24 * 3600 * 1000)) || 1),
+      );
       try {
         const data = await onQueryDate({ date: startDate, dayRange: spanDays });
-        if (data?.points) {
-          const result = classifyHotspots(data.points, { interval, tierFilter });
+        const tabPoints = data?.tabs?.[activeTab]?.points ?? data?.points;
+        if (tabPoints) {
+          const result = classifyHotspots(tabPoints, {
+            interval,
+            tierFilter,
+            windowHours: 12,
+          });
           onFiltered?.(result.filteredPoints, result.stats);
         }
       } finally {
         setLoading(false);
       }
     } else {
-      const result = classifyHotspots(rawPoints, { interval, tierFilter });
+      const result = classifyHotspots(rawPoints, { interval, tierFilter, windowHours: 12 });
       onFiltered?.(result.filteredPoints, result.stats);
     }
   };
 
-  // Preset quick selections
   const applyPreset = (hours) => {
     const end = new Date();
     const start = new Date(end.getTime() - hours * 3600 * 1000);
@@ -129,26 +148,25 @@ export default function TimelineControls({ rawPoints = [], onFiltered, onQueryDa
       endTime: end.toISOString().slice(11, 16),
     };
     setIntervalForm(form);
-    const startMs = start.getTime();
-    const endMs = end.getTime();
-    setActiveInterval({ startMs, endMs });
+    setActiveInterval({ startMs: start.getTime(), endMs: end.getTime() });
   };
 
-  const isLive = mode === "slider" && hoursBack === 0 && confidenceLevel === 2;
+  const isLive =
+    mode === "slider" && hoursBack === 0 && (activeTab !== "combined" || confidenceLevel === 0);
 
   const confidenceLabels = ["ALL", "MODERATE+", "VIIRS+DUAL", "HIGH+DUAL", "DUAL ONLY"];
   const confidenceDescriptions = [
-    "All sensors — MODIS solo + VIIRS solo + dual-confirmed. Includes low-confidence/coarse detections.",
+    "All combined detections — MODIS solo + VIIRS solo + dual-confirmed within 12 h.",
     "Moderate+ — excludes low-confidence MODIS (<50%) and low-confidence VIIRS.",
-    "Default operational view — high-resolution VIIRS 375m + dual-confirmed detections.",
-    "High confidence only — nominal/low filtered out. Only VIIRS High (H), MODIS ≥80%, and dual-confirmed.",
-    "Dual-confirmed only — coincident multi-satellite cross-validation (MODIS + VIIRS within 1 km and ±4 h).",
+    "High-resolution VIIRS 375m + dual-confirmed detections.",
+    "High confidence only — VIIRS High (H), MODIS ≥80%, and dual-confirmed.",
+    "Dual-confirmed only — coincident MODIS + VIIRS cross-validation (within 1 km & ±4 h).",
   ];
 
   return (
     <div className="timeline-section" aria-label="Thermal Timeline Controls">
       <div className="timeline-header">
-        <span className="timeline-title">TIMELINE & HISTORICAL SCRUB</span>
+        <span className="timeline-title">RECENT DETECTION WINDOW (12H)</span>
         {!isLive && (
           <button type="button" className="timeline-reset-btn" onClick={handleResetLive}>
             ↺ LIVE
@@ -156,37 +174,51 @@ export default function TimelineControls({ rawPoints = [], onFiltered, onQueryDa
         )}
       </div>
 
-      <div className="confidence-control">
-        <div className="confidence-header">
-          <span className="confidence-title">CONFIDENCE FILTER</span>
-          <span className="confidence-badge">
-            {confidenceLabels[confidenceLevel]}
-          </span>
-        </div>
-        <div className="confidence-slider-wrap">
-          <input
-            type="range"
-            min="0"
-            max="4"
-            step="1"
-            value={confidenceLevel}
-            onChange={(e) => setConfidenceLevel(parseInt(e.target.value, 10))}
-            disabled={disabled || loading}
-            className="confidence-slider"
-            aria-label="Confidence filter tier"
-          />
-          <div className="confidence-slider-ticks" aria-hidden="true">
-            <span>ALL</span>
-            <span>MOD+</span>
-            <span>VIIRS+DUAL</span>
-            <span>HIGH+</span>
-            <span>DUAL</span>
+      {activeTab === "combined" ? (
+        <div className="confidence-control">
+          <div className="confidence-header">
+            <span className="confidence-title">HARMONIZATION FILTER</span>
+            <span className="confidence-badge">{confidenceLabels[confidenceLevel]}</span>
           </div>
+          <div className="confidence-slider-wrap">
+            <input
+              type="range"
+              min="0"
+              max="4"
+              step="1"
+              value={confidenceLevel}
+              onChange={(e) => setConfidenceLevel(parseInt(e.target.value, 10))}
+              disabled={disabled || loading}
+              className="confidence-slider"
+              aria-label="Confidence filter tier"
+            />
+            <div className="confidence-slider-ticks" aria-hidden="true">
+              <span>ALL</span>
+              <span>MOD+</span>
+              <span>VIIRS+DUAL</span>
+              <span>HIGH+</span>
+              <span>DUAL</span>
+            </div>
+          </div>
+          <p className="confidence-desc">{confidenceDescriptions[confidenceLevel]}</p>
         </div>
-        <p className="confidence-desc">
-          {confidenceDescriptions[confidenceLevel]}
-        </p>
-      </div>
+      ) : (
+        <div className="confidence-control">
+          <div className="confidence-header">
+            <span className="confidence-title">
+              {activeTab === "viirs" ? "VIIRS-ONLY TRACKER FEED" : "MODIS-ONLY TRACKER FEED"}
+            </span>
+            <span className="confidence-badge">
+              {activeTab === "viirs" ? "375M · N20 + SNPP" : "1KM · TERRA + AQUA"}
+            </span>
+          </div>
+          <p className="confidence-desc">
+            {activeTab === "viirs"
+              ? "Low-confidence VIIRS hotspots and known static industrial/gas-flare sources are removed by the tracker before running ML predictions and hazard rating."
+              : "MODIS 1 km detections tracked independently over 14 days; hazard and ML predictions are isolated to the VIIRS tab."}
+          </p>
+        </div>
+      )}
 
       <div className="timeline-tabs" role="tablist">
         <button
@@ -197,7 +229,7 @@ export default function TimelineControls({ rawPoints = [], onFiltered, onQueryDa
           onClick={() => setMode("slider")}
           disabled={disabled}
         >
-          24H SLIDER
+          12H SLIDER
         </button>
         <button
           type="button"
@@ -215,7 +247,7 @@ export default function TimelineControls({ rawPoints = [], onFiltered, onQueryDa
         <div className="timeline-slider-box">
           <div className="timeline-readout">
             <span className="timeline-badge">
-              {hoursBack === 0 ? "LIVE (NOW)" : `-${hoursBack.toFixed(1)}h AGO`}
+              {hoursBack === 0 ? "RECENT (≤12H)" : `-${hoursBack.toFixed(1)}h AGO`}
             </span>
             <span className="timeline-utc">{sliderTimeLabel}</span>
           </div>
@@ -224,7 +256,7 @@ export default function TimelineControls({ rawPoints = [], onFiltered, onQueryDa
             <input
               type="range"
               min="0"
-              max="24"
+              max="12"
               step="0.5"
               value={hoursBack}
               onChange={handleSliderChange}
@@ -234,24 +266,24 @@ export default function TimelineControls({ rawPoints = [], onFiltered, onQueryDa
             />
             <div className="timeline-slider-ticks" aria-hidden="true">
               <span>NOW</span>
+              <span>-3h</span>
               <span>-6h</span>
+              <span>-9h</span>
               <span>-12h</span>
-              <span>-18h</span>
-              <span>-24h</span>
             </div>
           </div>
         </div>
       ) : (
         <form className="timeline-interval-box" onSubmit={handleApplyInterval}>
           <div className="timeline-presets">
-            <button type="button" onClick={() => applyPreset(6)} className="timeline-preset-btn">
-              Last 6h
+            <button type="button" onClick={() => applyPreset(4)} className="timeline-preset-btn">
+              Last 4h
+            </button>
+            <button type="button" onClick={() => applyPreset(8)} className="timeline-preset-btn">
+              Last 8h
             </button>
             <button type="button" onClick={() => applyPreset(12)} className="timeline-preset-btn">
               Last 12h
-            </button>
-            <button type="button" onClick={() => applyPreset(24)} className="timeline-preset-btn">
-              Last 24h
             </button>
           </div>
 
@@ -299,7 +331,12 @@ export default function TimelineControls({ rawPoints = [], onFiltered, onQueryDa
             <button type="submit" className="timeline-apply-btn" disabled={disabled || loading}>
               {loading ? "FETCHING..." : "FILTER INTERVAL"}
             </button>
-            <button type="button" className="timeline-clear-btn" onClick={handleResetLive} disabled={disabled}>
+            <button
+              type="button"
+              className="timeline-clear-btn"
+              onClick={handleResetLive}
+              disabled={disabled}
+            >
               RESET
             </button>
           </div>
@@ -307,21 +344,38 @@ export default function TimelineControls({ rawPoints = [], onFiltered, onQueryDa
       )}
 
       <div className="timeline-legend" aria-label="Confidence Tier Legend">
-        <div className="timeline-legend-item" title="Dual-Confirmed: Both MODIS + VIIRS saw this fire within 4 hours (95–100% confidence)">
-          <span className="dot dot-dual" aria-hidden="true" />
-          <span>DUAL <span className="legend-pct">95–100%</span></span>
-        </div>
-        <div className="timeline-legend-item" title="VIIRS Solo: High-resolution 375m active detection (75–90% confidence)">
-          <span className="dot dot-viirs" aria-hidden="true" />
-          <span>VIIRS <span className="legend-pct">75–90%</span></span>
-        </div>
-        <div className="timeline-legend-item" title="MODIS Solo: 1km coarse detection, unconfirmed by VIIRS (30–55% confidence)">
-          <span className="dot dot-modis" aria-hidden="true" />
-          <span>MODIS <span className="legend-pct">30–55%</span></span>
-        </div>
-        <div className="timeline-legend-item" title="Put Out / Inactive: No thermal signal in the latest satellite pass">
+        {activeTab === "combined" && (
+          <div
+            className="timeline-legend-item"
+            title="Dual-Confirmed: Both MODIS + VIIRS saw this fire within 4 hours (95–100% confidence)"
+          >
+            <span className="dot dot-dual" aria-hidden="true" />
+            <span>
+              DUAL <span className="legend-pct">95–100%</span>
+            </span>
+          </div>
+        )}
+        {activeTab !== "modis" && (
+          <div
+            className="timeline-legend-item"
+            title="VIIRS: High-resolution 375m active detection"
+          >
+            <span className="dot dot-viirs" aria-hidden="true" />
+            <span>VIIRS 375m</span>
+          </div>
+        )}
+        {activeTab !== "viirs" && (
+          <div className="timeline-legend-item" title="MODIS: 1km thermal anomaly detection">
+            <span className="dot dot-modis" aria-hidden="true" />
+            <span>MODIS 1km</span>
+          </div>
+        )}
+        <div
+          className="timeline-legend-item"
+          title="Inactive in latest 6h pass (within 12h detection window)"
+        >
           <span className="dot dot-extinguished" aria-hidden="true" />
-          <span>PUT OUT</span>
+          <span>COOLING</span>
         </div>
       </div>
     </div>
