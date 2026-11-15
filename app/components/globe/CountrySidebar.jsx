@@ -10,6 +10,7 @@ import HotspotRefresh from "./HotspotRefresh";
 import ViewModeSwitch from "./ViewModeSwitch";
 import TimelineControls from "./TimelineControls";
 import CountryPicker from "./CountryPicker";
+import FireInspectorPanel from "./FireInspectorPanel";
 
 gsap.registerPlugin(useGSAP);
 
@@ -28,7 +29,7 @@ function Stat({ label, value, highlight }) {
   );
 }
 
-function HudBody({ country, timelineStats }) {
+function HudBody({ country, activeTabData, timelineStats, fireListScope, isHistoricalWindow, sortedCount }) {
   if (country?.status === "error") {
     return (
       <p className="hud-note">
@@ -47,25 +48,33 @@ function HudBody({ country, timelineStats }) {
     );
   }
 
-  const { stats } = country.data;
+  const tabStats = activeTabData?.stats || country.data.stats;
   const current = timelineStats || {
-    total: stats.inside,
-    active: stats.inside,
+    total: tabStats.inside,
+    active: tabStats.inside,
     extinguished: 0,
-    dual: stats.dual || 0,
-    maxFrp: stats.maxFrp,
-    modis: stats.modis,
-    viirs: stats.viirs,
-    timeLabel: "LIVE (ROLLING 24H)",
+    dual: tabStats.dual || 0,
+    maxFrp: tabStats.maxFrp,
+    modis: tabStats.modis,
+    viirs: tabStats.viirs,
+    timeLabel: "RECENT (≤12H)",
   };
+
+  const detectionLabel = isHistoricalWindow ? "DETECTIONS (FILTERED)" : "DETECTIONS (≤12H)";
+  const firesLabel =
+    fireListScope === "past"
+      ? "PAST FIRES"
+      : isHistoricalWindow
+        ? "MATCHED FIRES"
+        : "RECENT FIRES";
 
   return (
     <>
       <div className="hud-stats">
-        <Stat label="DETECTIONS" value={current.total} />
+        <Stat label={detectionLabel} value={current.total} />
+        <Stat label={firesLabel} value={sortedCount ?? current.eventsCount ?? tabStats.eventsCount ?? 0} />
         <Stat label="PEAK FRP · MW" value={current.maxFrp} />
-        <Stat label="ACTIVE NOW" value={current.active} />
-        <Stat label="PUT OUT" value={current.extinguished} highlight={current.extinguished > 0} />
+        <Stat label="14D TRACKED FIRES" value={tabStats.fires14d ?? tabStats.eventsCount ?? 0} />
       </div>
       <div className="hud-secondary-metrics">
         <span>MODIS: {format(current.modis)}</span>
@@ -81,7 +90,7 @@ function HudBody({ country, timelineStats }) {
       </div>
       {current.total === 0 ? (
         <p className="hud-note">
-          No thermal anomalies detected for this timeframe.
+          No thermal anomalies match the current time/harmonization filter in this feed.
         </p>
       ) : (
         <div className="hud-legend" aria-hidden="true">
@@ -91,15 +100,41 @@ function HudBody({ country, timelineStats }) {
         </div>
       )}
       <p className="hud-updated">
-        CHECKED {formatTime(stats.generatedAt)} · AUTO-REFRESH EVERY 30 MIN
+        CHECKED {formatTime(tabStats.generatedAt)} · 14D TRACKED · ≤12H DEFAULT
       </p>
     </>
   );
 }
 
 function CountrySidebar({
-  active, open, onToggle, canExit, country, onBack, viewMode, switching, onChangeView,
-  onData, onRefreshError, onRefreshStart, onFilterChange, onQueryDate, onSelectCountry,
+  active,
+  open,
+  onToggle,
+  canExit,
+  country,
+  activeTab = "combined",
+  onSelectTab,
+  activeTabData: passedTabData,
+  sortedEvents = [],
+  fireListScope = "recent",
+  onChangeFireListScope,
+  selectedDay = null,
+  onSelectDay,
+  isHistoricalWindow = false,
+  onDemandCache = {},
+  onBack,
+  viewMode,
+  switching,
+  onChangeView,
+  onData,
+  onRefreshError,
+  onRefreshStart,
+  onFilterChange,
+  onFocusFire,
+  selectedFireId,
+  onSelectFire,
+  onQueryDate,
+  onSelectCountry,
 }) {
   const rootRef = useRef(null);
   const ready = country?.status === "ready";
@@ -112,10 +147,34 @@ function CountrySidebar({
     setTimelineStats(null);
   }
 
-  const handleFilteredPoints = useCallback((points, stats) => {
-    setTimelineStats(stats);
-    onFilterChange?.(points);
-  }, [onFilterChange]);
+  const tabs = country?.data?.tabs;
+  const activeTabData = passedTabData || tabs?.[activeTab] || {
+    id: activeTab,
+    stats: country?.data?.stats,
+    points: country?.data?.points || [],
+    points14d: country?.data?.points14d || country?.data?.points || [],
+    geojson: country?.data?.eventsGeoJson,
+    fire_events: country?.data?.events || [],
+    past_fire_events: country?.data?.pastEvents || [],
+    predictionsGeoJson: null,
+    modelSummary: null,
+    metadata: {},
+  };
+  const harmonization = country?.data?.harmonization || activeTabData?.harmonization || null;
+
+  const handleTabSelect = (tabId) => {
+    if (tabId === activeTab) return;
+    onSelectTab?.(tabId);
+    setTimelineStats(null);
+  };
+
+  const handleFilteredPoints = useCallback(
+    (points, stats, nextWindow) => {
+      setTimelineStats(stats);
+      onFilterChange?.(points, stats, nextWindow);
+    },
+    [onFilterChange],
+  );
 
   useGSAP(
     () => {
@@ -155,13 +214,22 @@ function CountrySidebar({
           duration: 1600,
           ease: "outExpo",
           onUpdate: () => {
-            element.firstChild.nodeValue = format(counter.value);
+            if (element.firstChild && element.dataset.count === String(end)) {
+              element.firstChild.nodeValue = format(counter.value);
+            }
           },
         }),
       );
     });
     return () => animations.forEach((animation) => animation.pause());
-  }, [ready, country?.iso3, country?.data?.stats?.generatedAt]);
+  }, [ready, country?.iso3, country?.data?.stats?.generatedAt, activeTab]);
+
+  const tabSubtitle =
+    activeTab === "viirs"
+      ? "VIIRS 375m · 14d tracked · ≤12h fires · Hazard & ML"
+      : activeTab === "modis"
+        ? "MODIS 1km · 14d tracked · ≤12h fires"
+        : "MODIS + VIIRS SSOT · 375m lock · 14d tracked · ≤12h fires";
 
   return (
     <aside
@@ -206,16 +274,96 @@ function CountrySidebar({
             {country?.located ? "YOUR REGION · FROM DEVICE LOCATION" : "DEFAULT REGION · LOCATION UNAVAILABLE"}
           </p>
           <h2 className="hud-title">{country?.name ?? "—"}</h2>
-          <p className="hud-sub">Thermal detections · MODIS + VIIRS · last 24 h</p>
+          <p className="hud-sub">{tabSubtitle}</p>
+
+          {ready && (
+            <div className="sensor-tabs" role="tablist" aria-label="Satellite tracker feeds">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={activeTab === "combined"}
+                className={`sensor-tab ${activeTab === "combined" ? "is-active" : ""}`}
+                onClick={() => handleTabSelect("combined")}
+                disabled={!canExit || switching}
+              >
+                <span className="sensor-tab-label">SSOT · HARMONIZED</span>
+                <span className="sensor-tab-count">
+                  {tabs?.combined?.fire_events?.length ?? 0} fires
+                </span>
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={activeTab === "viirs"}
+                className={`sensor-tab sensor-tab-viirs ${activeTab === "viirs" ? "is-active" : ""}`}
+                onClick={() => handleTabSelect("viirs")}
+                disabled={!canExit || switching}
+              >
+                <span className="sensor-tab-label">VIIRS · ML</span>
+                <span className="sensor-tab-count">
+                  {tabs?.viirs?.fire_events?.length ?? 0} fires
+                </span>
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={activeTab === "modis"}
+                className={`sensor-tab ${activeTab === "modis" ? "is-active" : ""}`}
+                onClick={() => handleTabSelect("modis")}
+                disabled={!canExit || switching}
+              >
+                <span className="sensor-tab-label">MODIS</span>
+                <span className="sensor-tab-count">
+                  {tabs?.modis?.fire_events?.length ?? 0} fires
+                </span>
+              </button>
+            </div>
+          )}
+
+          {ready && (
+            <FireInspectorPanel
+              iso3={country?.iso3}
+              activeTab={activeTab}
+              tabData={activeTabData}
+              harmonization={harmonization}
+              points14d={activeTabData.points14d || activeTabData.points}
+              rawPoints={activeTabData.points}
+              sortedEvents={sortedEvents}
+              fireListScope={fireListScope}
+              onChangeFireListScope={onChangeFireListScope}
+              selectedDay={selectedDay}
+              onSelectDay={onSelectDay}
+              isHistoricalWindow={isHistoricalWindow}
+              onDemandCache={onDemandCache}
+              selectedFireId={selectedFireId}
+              onSelectFire={onSelectFire}
+              onFocusFire={onFocusFire}
+              generatedAt={activeTabData.stats?.generatedAt}
+            />
+          )}
+
           {ready && (
             <TimelineControls
-              rawPoints={country?.data?.points}
+              rawPoints={activeTabData.points}
+              points14d={activeTabData.points14d || activeTabData.points}
+              activeTab={activeTab}
+              harmonization={harmonization}
+              selectedDay={selectedDay}
+              onSelectDay={onSelectDay}
               onFiltered={handleFilteredPoints}
               onQueryDate={onQueryDate}
               disabled={!canExit || switching}
             />
           )}
-          <HudBody country={country} timelineStats={timelineStats} />
+
+          <HudBody
+            country={country}
+            activeTabData={activeTabData}
+            timelineStats={timelineStats}
+            fireListScope={fireListScope}
+            isHistoricalWindow={isHistoricalWindow}
+            sortedCount={sortedEvents.length}
+          />
         </div>
         <button type="button" className="hud-back" onClick={onBack} disabled={!canExit || switching}>
           <span aria-hidden="true">←</span> Back to orbit
