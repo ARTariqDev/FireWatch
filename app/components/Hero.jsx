@@ -3,6 +3,7 @@
 import "./hero/hero.css";
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { pointMatchesTierFilter } from "@/lib/hotspot-data";
 import GlobeReadout from "./globe/GlobeReadout";
 import GlobeStage from "./globe/GlobeStage";
 import OnMapFireHud from "./globe/OnMapFireHud";
@@ -15,6 +16,79 @@ import HeroNav from "./hero/HeroNav";
 // The sidebar (and Anime.js with it) is only needed after the first click, so it loads on demand.
 const loadSidebar = () => import("./globe/CountrySidebar");
 const CountrySidebar = dynamic(loadSidebar, { ssr: false });
+
+function detectionMsFromEvent(det) {
+  if (!det) return NaN;
+  if (typeof det._acquired === "number" && Number.isFinite(det._acquired)) return det._acquired;
+  if (typeof det.acq_datetime_utc === "string") {
+    const trimmed = det.acq_datetime_utc.trim();
+    const norm = /Z$|[+-]\d{2}:?\d{2}$/i.test(trimmed)
+      ? trimmed
+      : `${trimmed.replace(" ", "T")}Z`;
+    const parsed = Date.parse(norm);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return NaN;
+}
+
+function eventMatchesFilter(event, filterWindow) {
+  if (!event?.fire) return false;
+  if (!filterWindow) return true;
+  const tierFilter = filterWindow.tierFilter || "all";
+  const hasRange = Number.isFinite(filterWindow.minTime) && Number.isFinite(filterWindow.maxTime);
+  const sats = Array.isArray(event.fire.satellites) ? event.fire.satellites : [];
+  const hasModisSat = sats.some((s) => String(s).toUpperCase().includes("MODIS"));
+  const hasViirsSat = sats.some((s) => String(s).toUpperCase().includes("VIIRS"));
+  const fireIsDual = hasModisSat && hasViirsSat;
+
+  if (tierFilter === "dual_only" && !fireIsDual) {
+    return false;
+  }
+
+  const dets = Array.isArray(event.detections) ? event.detections : [];
+  if (!dets.length) {
+    const fallbackMs = Date.parse(event.fire.last_detection_utc || "");
+    if (hasRange && Number.isFinite(fallbackMs)) {
+      return fallbackMs >= filterWindow.minTime && fallbackMs <= filterWindow.maxTime;
+    }
+    return true;
+  }
+
+  for (const det of dets) {
+    const acq = detectionMsFromEvent(det);
+    if (hasRange && Number.isFinite(acq)) {
+      if (acq < filterWindow.minTime || acq > filterWindow.maxTime) continue;
+    }
+    if (tierFilter === "all") return true;
+    const satId = String(det.satellite_id || det.sat || det.instrument || "").toUpperCase();
+    const isModis =
+      String(det.instrument || "").toUpperCase() === "MODIS" || satId.startsWith("MODIS");
+    const sensor = isModis ? 0 : 1;
+    const tier = fireIsDual ? 1 : sensor === 1 ? 2 : 3;
+    const evidence = fireIsDual ? 3 : 0;
+    if (
+      pointMatchesTierFilter(
+        [
+          det.lon ?? det.longitude,
+          det.lat ?? det.latitude,
+          det.frp ?? 0,
+          sensor,
+          1,
+          acq,
+          null,
+          evidence,
+          tier,
+          det.confidence,
+          det.satellite ?? det.satellite_id ?? det.sat ?? null,
+        ],
+        tierFilter,
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
 
 function approxDistanceKm(lat1, lon1, lat2, lon2) {
   const avgLatRad = (((lat1 + lat2) / 2) * Math.PI) / 180;
@@ -80,6 +154,9 @@ function Hero() {
   const [selectedFireId, setSelectedFireId] = useState(null);
   const [hoveredHit, setHoveredHit] = useState(null);
   const [onDemandCache, setOnDemandCache] = useState({});
+  const [filterWindow, setFilterWindow] = useState(null);
+  const [fireListScope, setFireListScope] = useState("recent"); // "recent" | "past"
+  const [selectedDay, setSelectedDay] = useState(null);
 
   // Warm the sidebar chunk shortly after load so it appears instantly on click.
   useEffect(() => {
@@ -145,6 +222,9 @@ function Hero() {
     setPhase("returning");
     setSelectedFireId(null);
     setHoveredHit(null);
+    setFilterWindow(null);
+    setSelectedDay(null);
+    setFireListScope("recent");
     requestRef.current?.abort();
     requestRef.current = null;
     await globeRef.current?.returnToOrbit();
@@ -163,6 +243,9 @@ function Hero() {
   const applyRefresh = useCallback((data) => {
     setSelectedFireId(null);
     setHoveredHit(null);
+    setFilterWindow(null);
+    setSelectedDay(null);
+    setFireListScope("recent");
     setCountry((current) =>
       current?.iso3 === data.country.iso3
         ? { ...current, status: "ready", name: data.country.name, data }
@@ -178,8 +261,13 @@ function Hero() {
     requestRef.current = null;
   }, []);
 
-  const handleFilterChange = useCallback((filteredPoints) => {
+  const handleFilterChange = useCallback((filteredPoints, _stats, nextWindow) => {
     globeRef.current?.updateHotspots(filteredPoints);
+    setFilterWindow(nextWindow || null);
+  }, []);
+
+  const handleSelectDay = useCallback((dateStr) => {
+    setSelectedDay((prev) => (dateStr && prev === dateStr ? null : dateStr || null));
   }, []);
 
   const handleFocusFire = useCallback((target) => {
@@ -195,18 +283,55 @@ function Hero() {
         id: activeTab,
         stats: countryData.stats,
         points: countryData.points || [],
+        points14d: countryData.points14d || countryData.points || [],
         geojson: countryData.eventsGeoJson,
+        all_geojson: countryData.allEventsGeoJson || countryData.eventsGeoJson,
         fire_events: countryData.events || [],
+        past_fire_events: countryData.pastEvents || [],
         predictionsGeoJson: null,
+        pastPredictionsGeoJson: null,
         modelSummary: null,
         metadata: {},
       }
     );
   }, [countryData, tabs, activeTab]);
 
+  const allTabEvents = useMemo(
+    () => [
+      ...(activeTabData?.fire_events || []),
+      ...(activeTabData?.past_fire_events || []),
+    ],
+    [activeTabData],
+  );
+
   const sortedEvents = useMemo(() => {
-    const list = activeTabData?.fire_events || [];
+    const recentList = activeTabData?.fire_events || [];
+    const pastList = activeTabData?.past_fire_events || [];
+    const isHistoricalWindow = Boolean(filterWindow?.isHistorical);
+    const tierFilter = filterWindow?.tierFilter || "all";
+
+    let list;
+    if (isHistoricalWindow) {
+      const pool = fireListScope === "past" ? pastList : [...recentList, ...pastList];
+      list = pool.filter((ev) => eventMatchesFilter(ev, filterWindow));
+    } else if (fireListScope === "past") {
+      list =
+        tierFilter === "all"
+          ? pastList
+          : pastList.filter((ev) => eventMatchesFilter(ev, { tierFilter }));
+    } else {
+      list =
+        tierFilter === "all"
+          ? recentList
+          : recentList.filter((ev) => eventMatchesFilter(ev, { tierFilter }));
+    }
+
     return [...list].sort((a, b) => {
+      if (fireListScope === "past") {
+        const multiA = a.hindcast?.isMultiPass ? 1 : 0;
+        const multiB = b.hindcast?.isMultiPass ? 1 : 0;
+        if (multiB !== multiA) return multiB - multiA;
+      }
       const expA = a.prediction?.prediction_status === "expansion_likely" ? 1 : 0;
       const expB = b.prediction?.prediction_status === "expansion_likely" ? 1 : 0;
       if (expB !== expA) return expB - expA;
@@ -215,16 +340,14 @@ function Hero() {
       if (hazB !== hazA) return hazB - hazA;
       return Number(b.fire?.frp_sum || 0) - Number(a.fire?.frp_sum || 0);
     });
-  }, [activeTabData]);
+  }, [activeTabData, filterWindow, fireListScope]);
 
   const selectedRawEvent = useMemo(() => {
     if (selectedFireId === null || selectedFireId === undefined) return null;
     return (
-      (activeTabData?.fire_events || []).find(
-        (e) => String(e.fire?.fire_final) === String(selectedFireId),
-      ) || null
+      allTabEvents.find((e) => String(e.fire?.fire_final) === String(selectedFireId)) || null
     );
-  }, [activeTabData, selectedFireId]);
+  }, [allTabEvents, selectedFireId]);
 
   const generatedAt = activeTabData?.stats?.generatedAt || "";
   const selectedCacheKey = selectedRawEvent?.fire
@@ -238,16 +361,20 @@ function Hero() {
       return onDemandEntry.predictionGeoJson.features;
     }
     const fireIdStr = String(selectedRawEvent.fire.fire_final);
-    const fromActive = (activeTabData?.predictionsGeoJson?.features || []).filter(
-      (f) => String(f?.properties?.event_id) === fireIdStr,
-    );
+    const activePool = [
+      ...(activeTabData?.predictionsGeoJson?.features || []),
+      ...(activeTabData?.pastPredictionsGeoJson?.features || []),
+    ];
+    const fromActive = activePool.filter((f) => String(f?.properties?.event_id) === fireIdStr);
     if (fromActive.length) return fromActive;
 
     if (activeTab === "combined" && selectedRawEvent.viirs_fire_final != null) {
       const viirsIdStr = String(selectedRawEvent.viirs_fire_final);
-      return (tabs?.viirs?.predictionsGeoJson?.features || []).filter(
-        (f) => String(f?.properties?.event_id) === viirsIdStr,
-      );
+      const viirsPool = [
+        ...(tabs?.viirs?.predictionsGeoJson?.features || []),
+        ...(tabs?.viirs?.pastPredictionsGeoJson?.features || []),
+      ];
+      return viirsPool.filter((f) => String(f?.properties?.event_id) === viirsIdStr);
     }
     return [];
   }, [selectedRawEvent, onDemandEntry, activeTabData, activeTab, tabs]);
@@ -263,25 +390,43 @@ function Hero() {
 
   const hasViirsSupport = Boolean(
     selectedRawEvent?.fire &&
-      (activeTab === "viirs" ||
-        (activeTab === "combined" &&
-          (selectedRawEvent.fire.satellites || []).some((s) =>
-            String(s).toUpperCase().includes("VIIRS"),
-          ))),
+    (activeTab === "viirs" ||
+      (activeTab === "combined" &&
+        (selectedRawEvent.fire.satellites || []).some((s) =>
+          String(s).toUpperCase().includes("VIIRS"),
+        ))),
   );
+
+  const targetModelEvent = useMemo(() => {
+    if (!selectedRawEvent?.fire) return null;
+    if (activeTab === "combined" && selectedRawEvent.viirs_fire_final != null) {
+      const viirsPool = [
+        ...(tabs?.viirs?.fire_events || []),
+        ...(tabs?.viirs?.past_fire_events || []),
+      ];
+      const matchedViirs = viirsPool.find(
+        (ev) => String(ev.fire?.fire_final) === String(selectedRawEvent.viirs_fire_final),
+      );
+      if (matchedViirs?.fire) return matchedViirs;
+    }
+    return selectedRawEvent;
+  }, [selectedRawEvent, activeTab, tabs]);
 
   const needsModelFetch = Boolean(
     country?.status === "ready" &&
-      selectedRawEvent?.fire &&
-      hasViirsSupport &&
-      (!selectedRawEvent.hazard ||
-        !selectedRawEvent.prediction ||
-        !selectedPredictionFeatures.length) &&
-      !onDemandEntry?.fetched,
+    targetModelEvent?.fire &&
+    selectedRawEvent?.fire &&
+    hasViirsSupport &&
+    (!selectedRawEvent.hazard ||
+      !selectedRawEvent.prediction ||
+      !selectedPredictionFeatures.length) &&
+    !onDemandEntry?.fetched,
   );
 
   useEffect(() => {
-    if (!needsModelFetch || !selectedRawEvent?.fire || !selectedCacheKey) return;
+    if (!needsModelFetch || !targetModelEvent?.fire || !selectedRawEvent?.fire || !selectedCacheKey) {
+      return;
+    }
 
     const controller = new AbortController();
     fetch("/api/fire-models", {
@@ -289,9 +434,17 @@ function Hero() {
       headers: { "Content-Type": "application/json" },
       signal: controller.signal,
       body: JSON.stringify({
-        fire_event: { fire: selectedRawEvent.fire, detections: selectedRawEvent.detections },
+        fire_event: {
+          fire: targetModelEvent.fire,
+          detections: targetModelEvent.detections,
+          is_past: targetModelEvent.is_past ?? selectedRawEvent.is_past,
+          hindcast: targetModelEvent.hindcast?.earlyFireEvent
+            ? { earlyFireEvent: targetModelEvent.hindcast.earlyFireEvent }
+            : undefined,
+        },
         include_hazard: !selectedRawEvent.hazard,
         include_prediction: !selectedRawEvent.prediction || !selectedPredictionFeatures.length,
+        use_hindcast_snapshot: Boolean(targetModelEvent.is_past ?? selectedRawEvent.is_past),
       }),
     })
       .then((res) => (res.ok ? res.json() : null))
@@ -322,13 +475,52 @@ function Hero() {
       });
 
     return () => controller.abort();
-  }, [needsModelFetch, selectedRawEvent, selectedCacheKey, selectedPredictionFeatures.length]);
+  }, [
+    needsModelFetch,
+    targetModelEvent,
+    selectedRawEvent,
+    selectedCacheKey,
+    selectedPredictionFeatures.length,
+  ]);
+
+  const filteredOverlayGeo = useMemo(() => {
+    if (!activeTabData) return { trackedGeoJson: null, predictionsGeoJson: null };
+    const visibleIds = new Set(sortedEvents.map((e) => String(e.fire?.fire_final)));
+    const sourceTracked =
+      filterWindow?.isHistorical || fireListScope === "past"
+        ? activeTabData.all_geojson || activeTabData.geojson
+        : activeTabData.geojson;
+    const trackedFeatures = (sourceTracked?.features || []).filter((f) =>
+      visibleIds.has(String(f?.properties?.fire_final ?? f?.id)),
+    );
+    const trackedGeoJson = sourceTracked
+      ? { ...sourceTracked, features: trackedFeatures }
+      : null;
+
+    const rawPred = activeTabData.predictionsGeoJson || null;
+    const rawPastPred = activeTabData.pastPredictionsGeoJson || null;
+    if (!rawPred && !rawPastPred) {
+      return { trackedGeoJson, predictionsGeoJson: null };
+    }
+    const combinedPredFeatures =
+      filterWindow?.isHistorical || fireListScope === "past"
+        ? [...(rawPred?.features || []), ...(rawPastPred?.features || [])]
+        : rawPred?.features || [];
+    const filteredPredFeatures = combinedPredFeatures.filter((f) =>
+      visibleIds.has(String(f?.properties?.event_id)),
+    );
+    const predictionsGeoJson = rawPred
+      ? { ...rawPred, features: filteredPredFeatures }
+      : { type: "FeatureCollection", features: filteredPredFeatures };
+
+    return { trackedGeoJson, predictionsGeoJson };
+  }, [activeTabData, sortedEvents, filterWindow?.isHistorical, fireListScope]);
 
   useEffect(() => {
     if (country?.status !== "ready" || !activeTabData) return;
     globeRef.current?.updateTrackerOverlay({
-      trackedGeoJson: activeTabData.geojson,
-      predictionsGeoJson: activeTabData.predictionsGeoJson || null,
+      trackedGeoJson: filteredOverlayGeo.trackedGeoJson,
+      predictionsGeoJson: filteredOverlayGeo.predictionsGeoJson,
       selectedFireId,
       selectedFireEvent: hydratedSelectedFireEvent,
       selectedPredictionFeatures,
@@ -337,6 +529,7 @@ function Hero() {
   }, [
     country?.status,
     activeTabData,
+    filteredOverlayGeo,
     activeTab,
     selectedFireId,
     hydratedSelectedFireEvent,
@@ -349,8 +542,11 @@ function Hero() {
         setSelectedFireId(null);
         return;
       }
-      const events = activeTabData?.fire_events || [];
-      const matched = findMatchingFireEvent(events, input);
+      const events = sortedEvents.length ? sortedEvents : allTabEvents;
+      let matched = findMatchingFireEvent(events, input);
+      if (!matched && events !== allTabEvents) {
+        matched = findMatchingFireEvent(allTabEvents, input);
+      }
       if (matched?.fire) {
         setSelectedFireId(matched.fire.fire_final);
         setHoveredHit(null);
@@ -373,7 +569,7 @@ function Hero() {
         globeRef.current?.focusFire({ lng: input.lng, lat: input.lat, areaKm2: 0.5 });
       }
     },
-    [activeTabData],
+    [sortedEvents, allTabEvents],
   );
 
   const handleClearFire = useCallback(() => {
@@ -386,6 +582,8 @@ function Hero() {
     setActiveTab(tabId);
     setSelectedFireId(null);
     setHoveredHit(null);
+    setFilterWindow(null);
+    setSelectedDay(null);
   }, []);
 
   const selectCountry = useCallback(
@@ -395,6 +593,9 @@ function Hero() {
 
       setSelectedFireId(null);
       setHoveredHit(null);
+      setFilterWindow(null);
+      setSelectedDay(null);
+      setFireListScope("recent");
       requestRef.current?.abort();
       setPhase("flying");
       setCountry({ status: "loading", iso3: target.iso3, name: target.name || target.iso3, located: false });
@@ -456,7 +657,7 @@ function Hero() {
           setSelectedFireId(null);
           setHoveredHit(null);
           setCountry((current) => ({ ...current, status: "ready", data }));
-          globeRef.current?.updateHotspots(data.points, data.country);
+          globeRef.current?.updateHotspots(data.points14d || data.points, data.country);
         }
         return data;
       } catch (err) {
@@ -501,6 +702,10 @@ function Hero() {
         {expanded && country?.status === "ready" && (
           <OnMapFireHud
             activeTab={activeTab}
+            fireListScope={fireListScope}
+            onChangeFireListScope={setFireListScope}
+            recentCount={activeTabData?.fire_events?.length ?? 0}
+            pastCount={activeTabData?.past_fire_events?.length ?? 0}
             sortedEvents={sortedEvents}
             selectedFireEvent={hydratedSelectedFireEvent}
             isLoadingModels={needsModelFetch}
@@ -522,6 +727,11 @@ function Hero() {
             onSelectTab={handleSelectTab}
             activeTabData={activeTabData}
             sortedEvents={sortedEvents}
+            fireListScope={fireListScope}
+            onChangeFireListScope={setFireListScope}
+            selectedDay={selectedDay}
+            onSelectDay={handleSelectDay}
+            isHistoricalWindow={Boolean(filterWindow?.isHistorical)}
             onDemandCache={onDemandCache}
             onBack={backToOrbit}
             viewMode={viewMode}

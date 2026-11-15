@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
+import FireActivityCalendar from "./FireActivityCalendar";
 
 const RATING_CLASS = {
   Low: "hazard-low",
@@ -41,11 +42,28 @@ function formatPredictionStatus(status) {
   return status ? String(status).toUpperCase() : "UNAVAILABLE";
 }
 
+function formatSsotRegime(regime) {
+  if (regime === "coincident_dual") return "Coincident Dual (MODIS+VIIRS)";
+  if (regime === "diurnal_bridged") return "Diurnal Bridged (t0+Δt)";
+  if (regime === "sub_resolution_viirs") return "VIIRS 375m Sub-Resolution";
+  if (regime === "modis_gap_fill") return "MODIS 1km Gap-Fill";
+  if (regime === "demoted_modis_anomaly") return "Demoted MODIS Anomaly";
+  return regime ? String(regime).replaceAll("_", " ").toUpperCase() : "SSOT";
+}
+
 export default function FireInspectorPanel({
   iso3,
   activeTab,
   tabData,
+  harmonization = null,
+  points14d = [],
+  rawPoints = [],
   sortedEvents: passedSortedEvents,
+  fireListScope = "recent",
+  onChangeFireListScope,
+  selectedDay = null,
+  onSelectDay,
+  isHistoricalWindow = false,
   onDemandCache = {},
   selectedFireId,
   onSelectFire,
@@ -53,14 +71,16 @@ export default function FireInspectorPanel({
   generatedAt,
 }) {
   const fireEvents = useMemo(() => tabData?.fire_events || [], [tabData?.fire_events]);
+  const pastEvents = useMemo(() => tabData?.past_fire_events || [], [tabData?.past_fire_events]);
   const modelSummary = tabData?.modelSummary || null;
   const metadata = tabData?.metadata || {};
 
   const sortedEvents = useMemo(() => {
-    if (Array.isArray(passedSortedEvents) && passedSortedEvents.length) {
+    if (Array.isArray(passedSortedEvents)) {
       return passedSortedEvents;
     }
-    return [...fireEvents].sort((a, b) => {
+    const baseList = fireListScope === "past" ? pastEvents : fireEvents;
+    return [...baseList].sort((a, b) => {
       const expA = a.prediction?.prediction_status === "expansion_likely" ? 1 : 0;
       const expB = b.prediction?.prediction_status === "expansion_likely" ? 1 : 0;
       if (expB !== expA) return expB - expA;
@@ -69,19 +89,17 @@ export default function FireInspectorPanel({
       if (hazB !== hazA) return hazB - hazA;
       return Number(b.fire?.frp_sum || 0) - Number(a.fire?.frp_sum || 0);
     });
-  }, [passedSortedEvents, fireEvents]);
+  }, [passedSortedEvents, fireEvents, pastEvents, fireListScope]);
 
   const activeFireEvent = useMemo(() => {
-    if (!sortedEvents.length) return null;
-    if (selectedFireId !== null && selectedFireId !== undefined) {
-      return (
-        sortedEvents.find(
-          (e) => String(e.fire?.fire_final) === String(selectedFireId),
-        ) || null
-      );
-    }
-    return null;
-  }, [sortedEvents, selectedFireId]);
+    if (selectedFireId === null || selectedFireId === undefined) return null;
+    return (
+      sortedEvents.find((e) => String(e.fire?.fire_final) === String(selectedFireId)) ||
+      fireEvents.find((e) => String(e.fire?.fire_final) === String(selectedFireId)) ||
+      pastEvents.find((e) => String(e.fire?.fire_final) === String(selectedFireId)) ||
+      null
+    );
+  }, [sortedEvents, fireEvents, pastEvents, selectedFireId]);
 
   const activeFireId = activeFireEvent?.fire?.fire_final;
   const cacheKey = `${iso3 || ""}:${generatedAt || ""}:${activeTab}:${activeFireId ?? ""}`;
@@ -116,6 +134,11 @@ export default function FireInspectorPanel({
   const showModelSections = Boolean(
     activeTab === "viirs" || hasViirsSupport || resolvedHazard || resolvedPrediction,
   );
+  const harmSummary = harmonization?.summary || null;
+  const harmValidation = harmonization?.validation || null;
+  const harmSsot = harmonization?.ssot || null;
+  const harmContext = harmonization?.context || null;
+  const eventContext = activeFireEvent?.context || harmonization?.context || null;
 
   return (
     <div className="tracker-models-panel">
@@ -196,21 +219,160 @@ export default function FireInspectorPanel({
         </div>
       )}
 
+      {(activeTab === "combined" || activeTab === "viirs") && harmSummary && (
+        <div className="harm-baseline-section" aria-label="Single Source of Truth Harmonization and Activity Calendar">
+          <div className="model-section-header">
+            <span className="model-section-title">SSOT HARMONIZATION &amp; CALENDAR (PIPE A)</span>
+            <span className="model-version-tag">
+              MODIS-EQ · {String(harmValidation?.qualityFlag || "low").toUpperCase()}
+            </span>
+          </div>
+
+          <div className="harm-headline-grid">
+            <div className="harm-kpi">
+              <span>TODAY (MODIS-EQ)</span>
+              <strong>
+                {num(harmSummary.latestModisEquivalent, 1)}{" "}
+                <small>
+                  [{num(harmSummary.latestInterval?.[0], 1)}–{num(harmSummary.latestInterval?.[1], 1)}]
+                </small>
+              </strong>
+              <em>
+                1 km cell-days · 90% PI
+                {harmContext?.historicalMonthMedian != null
+                  ? ` · Hist med ${num(harmContext.historicalMonthMedian, 1)}`
+                  : ""}
+              </em>
+            </div>
+            <div className="harm-kpi">
+              <span>VS 14D MEDIAN ({num(harmSummary.median14d, 1)})</span>
+              <strong>
+                {harmSummary.anomalyRatio !== null
+                  ? `${num(harmSummary.anomalyRatio, 2)}×`
+                  : harmSummary.latestModisEquivalent > 0
+                    ? "ABOVE 0 MED"
+                    : "1.00×"}{" "}
+                <small>P{harmSummary.percentile}</small>
+              </strong>
+              <em>
+                {harmSummary.anomalyDelta >= 0 ? "+" : ""}
+                {num(harmSummary.anomalyDelta, 1)} cell-days · IQR {num(harmSummary.iqr14d, 1)}
+              </em>
+            </div>
+          </div>
+
+          {harmSsot && (
+            <div className="ssot-regime-strip" aria-label="3-Regime SSOT Optical and Temporal Reconciliation">
+              <span
+                className="ssot-regime-chip is-dual"
+                title={`Coincident overlap <= ${harmSsot.coincidentWindowMin ?? 90}m`}
+              >
+                Dual {harmSsot.coincidentDual ?? 0}
+              </span>
+              <span
+                className="ssot-regime-chip is-bridged"
+                title={`Diurnal bridged t0+Δt <= ${harmSsot.bridgedWindowHours ?? 5.5}h`}
+              >
+                Bridged t₀ {harmSsot.diurnalBridged ?? 0}
+              </span>
+              <span className="ssot-regime-chip is-viirs" title="VIIRS 375m solo sub-resolution detections">
+                VIIRS 375m {harmSsot.subResolutionViirs ?? 0}
+              </span>
+              <span className="ssot-regime-chip is-modis" title="MODIS 1km gap-fill detections">
+                MODIS Gap {harmSsot.modisGapFill ?? 0}
+              </span>
+              {(harmSsot.demotedAnomalies ?? 0) > 0 && (
+                <span
+                  className="ssot-regime-chip is-demoted"
+                  title="MODIS solo uncorroborated during recent VIIRS overpass"
+                >
+                  Demoted {harmSsot.demotedAnomalies}
+                </span>
+              )}
+              {harmSsot.meanFrpRatio !== null && harmSsot.meanFrpRatio !== undefined && (
+                <span
+                  className="ssot-regime-chip is-ratio"
+                  title="Non-additive dual FRP ratio (MODIS / sum VIIRS)"
+                >
+                  FRP_M/ΣV {num(harmSsot.meanFrpRatio, 2)}×
+                </span>
+              )}
+            </div>
+          )}
+
+          <div className="harm-meta-row">
+            <span>
+              Transfer: ×{harmValidation?.transferRatio ?? "—"} ({harmValidation?.method || "prior"}) ·
+              LOO MAE {harmValidation?.mae ?? "—"} / Bias {harmValidation?.bias ?? "—"}
+            </span>
+            <span>
+              ~13:30 pass: {Math.round((harmSummary.filterStats?.afternoonShare ?? 0) * 100)}% ·{" "}
+              {harmSummary.filterStats?.driftDetected
+                ? "Orbital drift (±5.5h gate)"
+                : "Nominal timing (±4h)"}
+            </span>
+          </div>
+
+          <FireActivityCalendar
+            iso3={iso3}
+            activeTab={activeTab}
+            harmonization={harmonization}
+            points14d={points14d}
+            rawPoints={rawPoints}
+            selectedDay={selectedDay}
+            onSelectDay={onSelectDay}
+            generatedAt={generatedAt}
+          />
+        </div>
+      )}
+
       <div className="tracked-fires-section">
+        <div className="fire-scope-switch" role="tablist" aria-label="Fire event list timeframe">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={fireListScope === "recent"}
+            className={`fire-scope-btn ${fireListScope === "recent" ? "is-active" : ""}`}
+            onClick={() => onChangeFireListScope?.("recent")}
+          >
+            RECENT (≤12H) · {fireEvents.length}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={fireListScope === "past"}
+            className={`fire-scope-btn ${fireListScope === "past" ? "is-active" : ""}`}
+            onClick={() => onChangeFireListScope?.("past")}
+          >
+            PAST FIRES (14D) · {pastEvents.length}
+          </button>
+        </div>
+
         <div className="model-section-header">
-          <span className="model-section-title">RECENT TRACKED FIRES (≤12H)</span>
+          <span className="model-section-title">
+            {isHistoricalWindow
+              ? "MATCHED FIRES IN WINDOW"
+              : fireListScope === "past"
+                ? "PAST TRACKED FIRES (ACTUAL VS PREDICTED)"
+                : "RECENT TRACKED FIRES (≤12H)"}
+          </span>
           <span className="model-count-tag">{sortedEvents.length} EVENTS</span>
         </div>
 
         {sortedEvents.length === 0 ? (
-          <p className="hud-note">No tracked fires detected within the last 12 hours for this feed.</p>
+          <p className="hud-note">
+            {fireListScope === "past"
+              ? "No past tracked fires match the active filter."
+              : "No tracked fires match the current filter in this feed."}
+          </p>
         ) : (
-          <ul className="tracked-fire-list" role="listbox" aria-label="Recent tracked fires">
-            {sortedEvents.map((event) => {
+          <ul className="tracked-fire-list" role="listbox" aria-label="Tracked fires">
+            {sortedEvents.slice(0, 60).map((event) => {
               const fire = event.fire;
               const isSelected = String(fire.fire_final) === String(activeFireId);
               const haz = event.hazard;
               const pred = event.prediction;
+              const hc = event.hindcast;
               return (
                 <li key={fire.fire_final}>
                   <button
@@ -240,6 +402,11 @@ export default function FireInspectorPanel({
                       <span>{num(fire.frp_sum, 1)} MW</span>
                       <span>·</span>
                       <span>{fire.n_det} det / {fire.n_passes}p</span>
+                      {event.is_past && hc?.isMultiPass && (
+                        <span className="pred-chip pred-actual">
+                          ACTUAL +{num(hc.actualAddAreaKm2, 2)} km²
+                        </span>
+                      )}
                       {pred && (
                         <span
                           className={`pred-chip ${
@@ -330,6 +497,86 @@ export default function FireInspectorPanel({
             <span>SATELLITES: {(f.satellites || []).join(", ") || "—"}</span>
             {f.merges_in > 0 && <span>MERGES: {f.merges_in}</span>}
           </div>
+
+          {activeFireEvent?.ssot && (
+            <div className="inspector-ssot-pill" aria-label="SSOT fire provenance">
+              <span>SSOT: {formatSsotRegime(activeFireEvent.ssot.primaryRegime)}</span>
+              {activeFireEvent.ssot.modisCorroboratedCount > 0 && (
+                <span>MODIS corr: {activeFireEvent.ssot.modisCorroboratedCount}</span>
+              )}
+              {activeFireEvent.ssot.frpRatio !== null &&
+                activeFireEvent.ssot.frpRatio !== undefined && (
+                  <span>FRP_M/ΣV: {num(activeFireEvent.ssot.frpRatio, 2)}×</span>
+                )}
+              {activeFireEvent.ssot.scanMaxKm !== null &&
+                activeFireEvent.ssot.scanMaxKm !== undefined && (
+                  <span>GIFOV≤{num(activeFireEvent.ssot.scanMaxKm, 2)} km</span>
+                )}
+            </div>
+          )}
+
+          {activeFireEvent?.is_past && activeFireEvent?.hindcast && (
+            <div className="hindcast-compare-box" aria-label="Actual versus model predicted spread">
+              <div className="inspector-subhead">
+                <span className="inspector-sublabel">
+                  {hasViirsSupport
+                    ? "ACTUAL VS. PREDICTED SPREAD (HINDCAST)"
+                    : "OBSERVED MULTI-PASS SPREAD (MODIS)"}
+                </span>
+                <span className="hindcast-badge">
+                  {activeFireEvent.hindcast.persisted
+                    ? `PERSISTED (${activeFireEvent.hindcast.totalPasses} PASSES)`
+                    : "SINGLE PASS"}
+                </span>
+              </div>
+              <div className="ml-area-grid">
+                <div className="inspector-kv">
+                  <span>INITIAL PASS (T0)</span>
+                  <strong>{num(activeFireEvent.hindcast.initialAreaKm2, 2)} km²</strong>
+                </div>
+                <div className="inspector-kv hindcast-actual-cell">
+                  <span>ACTUAL SPREAD</span>
+                  <strong>{num(activeFireEvent.hindcast.actualFinalAreaKm2, 2)} km²</strong>
+                </div>
+                <div className="inspector-kv hindcast-pred-cell">
+                  <span>MODEL PREDICTED</span>
+                  <strong>
+                    {resolvedPrediction
+                      ? `${num(resolvedPrediction.predicted_total_area_km2, 2)} km²`
+                      : !hasViirsSupport
+                        ? "VIIRS Only"
+                        : isLoadingHazard
+                          ? "Scoring..."
+                          : "—"}
+                  </strong>
+                </div>
+                <div className="inspector-kv">
+                  <span>ACTUAL GROWTH</span>
+                  <strong>+{num(activeFireEvent.hindcast.actualAddAreaKm2, 2)} km²</strong>
+                </div>
+              </div>
+              {resolvedPrediction && (
+                <p className="hindcast-outcome-note">
+                  Persistence: <strong>{activeFireEvent.hindcast.persisted ? "Yes" : "No"}</strong>{" "}
+                  (Model 1: {pct(resolvedPrediction.persistence_probability)}) · Expansion{" "}
+                  ≥1km²/25%: <strong>{activeFireEvent.hindcast.expandedActual ? "Yes" : "No"}</strong>{" "}
+                  (Model 2: {pct(resolvedPrediction.expansion_probability)})
+                </p>
+              )}
+            </div>
+          )}
+
+          {eventContext && (
+            <div className="context-baseline-pill">
+              <span>14D REGIONAL CONTEXT</span>
+              <strong>
+                {eventContext.anomalyRatio !== null
+                  ? `${num(eventContext.anomalyRatio, 2)}× median`
+                  : "Above zero median"}{" "}
+                · P{eventContext.percentile} · {num(eventContext.modisEquivalent, 1)} MODIS-eq
+              </strong>
+            </div>
+          )}
 
           {lcTotal > 0 && (
             <div className="land-cover-wrap">

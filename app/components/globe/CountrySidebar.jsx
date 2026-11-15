@@ -29,7 +29,7 @@ function Stat({ label, value, highlight }) {
   );
 }
 
-function HudBody({ country, activeTabData, timelineStats }) {
+function HudBody({ country, activeTabData, timelineStats, fireListScope, isHistoricalWindow, sortedCount }) {
   if (country?.status === "error") {
     return (
       <p className="hud-note">
@@ -60,11 +60,19 @@ function HudBody({ country, activeTabData, timelineStats }) {
     timeLabel: "RECENT (≤12H)",
   };
 
+  const detectionLabel = isHistoricalWindow ? "DETECTIONS (FILTERED)" : "DETECTIONS (≤12H)";
+  const firesLabel =
+    fireListScope === "past"
+      ? "PAST FIRES"
+      : isHistoricalWindow
+        ? "MATCHED FIRES"
+        : "RECENT FIRES";
+
   return (
     <>
       <div className="hud-stats">
-        <Stat label="DETECTIONS (≤12H)" value={current.total} />
-        <Stat label="RECENT FIRES" value={tabStats.eventsCount ?? 0} />
+        <Stat label={detectionLabel} value={current.total} />
+        <Stat label={firesLabel} value={sortedCount ?? current.eventsCount ?? tabStats.eventsCount ?? 0} />
         <Stat label="PEAK FRP · MW" value={current.maxFrp} />
         <Stat label="14D TRACKED FIRES" value={tabStats.fires14d ?? tabStats.eventsCount ?? 0} />
       </div>
@@ -82,7 +90,7 @@ function HudBody({ country, activeTabData, timelineStats }) {
       </div>
       {current.total === 0 ? (
         <p className="hud-note">
-          No thermal anomalies detected within the 12-hour window for this feed.
+          No thermal anomalies match the current time/harmonization filter in this feed.
         </p>
       ) : (
         <div className="hud-legend" aria-hidden="true">
@@ -92,7 +100,7 @@ function HudBody({ country, activeTabData, timelineStats }) {
         </div>
       )}
       <p className="hud-updated">
-        CHECKED {formatTime(tabStats.generatedAt)} · 14D TRACKED · ≤12H SHOWN
+        CHECKED {formatTime(tabStats.generatedAt)} · 14D TRACKED · ≤12H DEFAULT
       </p>
     </>
   );
@@ -108,6 +116,11 @@ function CountrySidebar({
   onSelectTab,
   activeTabData: passedTabData,
   sortedEvents = [],
+  fireListScope = "recent",
+  onChangeFireListScope,
+  selectedDay = null,
+  onSelectDay,
+  isHistoricalWindow = false,
   onDemandCache = {},
   onBack,
   viewMode,
@@ -139,12 +152,15 @@ function CountrySidebar({
     id: activeTab,
     stats: country?.data?.stats,
     points: country?.data?.points || [],
+    points14d: country?.data?.points14d || country?.data?.points || [],
     geojson: country?.data?.eventsGeoJson,
     fire_events: country?.data?.events || [],
+    past_fire_events: country?.data?.pastEvents || [],
     predictionsGeoJson: null,
     modelSummary: null,
     metadata: {},
   };
+  const harmonization = country?.data?.harmonization || activeTabData?.harmonization || null;
 
   const handleTabSelect = (tabId) => {
     if (tabId === activeTab) return;
@@ -153,9 +169,9 @@ function CountrySidebar({
   };
 
   const handleFilteredPoints = useCallback(
-    (points, stats) => {
+    (points, stats, nextWindow) => {
       setTimelineStats(stats);
-      onFilterChange?.(points);
+      onFilterChange?.(points, stats, nextWindow);
     },
     [onFilterChange],
   );
@@ -198,7 +214,9 @@ function CountrySidebar({
           duration: 1600,
           ease: "outExpo",
           onUpdate: () => {
-            element.firstChild.nodeValue = format(counter.value);
+            if (element.firstChild && element.dataset.count === String(end)) {
+              element.firstChild.nodeValue = format(counter.value);
+            }
           },
         }),
       );
@@ -211,7 +229,7 @@ function CountrySidebar({
       ? "VIIRS 375m · 14d tracked · ≤12h fires · Hazard & ML"
       : activeTab === "modis"
         ? "MODIS 1km · 14d tracked · ≤12h fires"
-        : "MODIS + VIIRS combined · 14d tracked · ≤12h fires";
+        : "MODIS + VIIRS SSOT · 375m lock · 14d tracked · ≤12h fires";
 
   return (
     <aside
@@ -268,7 +286,7 @@ function CountrySidebar({
                 onClick={() => handleTabSelect("combined")}
                 disabled={!canExit || switching}
               >
-                <span className="sensor-tab-label">MODIS + VIIRS</span>
+                <span className="sensor-tab-label">SSOT · HARMONIZED</span>
                 <span className="sensor-tab-count">
                   {tabs?.combined?.fire_events?.length ?? 0} fires
                 </span>
@@ -307,7 +325,15 @@ function CountrySidebar({
               iso3={country?.iso3}
               activeTab={activeTab}
               tabData={activeTabData}
+              harmonization={harmonization}
+              points14d={activeTabData.points14d || activeTabData.points}
+              rawPoints={activeTabData.points}
               sortedEvents={sortedEvents}
+              fireListScope={fireListScope}
+              onChangeFireListScope={onChangeFireListScope}
+              selectedDay={selectedDay}
+              onSelectDay={onSelectDay}
+              isHistoricalWindow={isHistoricalWindow}
               onDemandCache={onDemandCache}
               selectedFireId={selectedFireId}
               onSelectFire={onSelectFire}
@@ -319,7 +345,11 @@ function CountrySidebar({
           {ready && (
             <TimelineControls
               rawPoints={activeTabData.points}
+              points14d={activeTabData.points14d || activeTabData.points}
               activeTab={activeTab}
+              harmonization={harmonization}
+              selectedDay={selectedDay}
+              onSelectDay={onSelectDay}
               onFiltered={handleFilteredPoints}
               onQueryDate={onQueryDate}
               disabled={!canExit || switching}
@@ -330,6 +360,9 @@ function CountrySidebar({
             country={country}
             activeTabData={activeTabData}
             timelineStats={timelineStats}
+            fireListScope={fireListScope}
+            isHistoricalWindow={isHistoricalWindow}
+            sortedCount={sortedEvents.length}
           />
         </div>
         <button type="button" className="hud-back" onClick={onBack} disabled={!canExit || switching}>
