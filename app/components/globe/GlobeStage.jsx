@@ -15,9 +15,17 @@ function whenIdle(task) {
 }
 
 // Full-hero Mapbox globe. `slotRef` marks where the globe rests while in orbit.
-function GlobeStage({ ref, slotRef, onFeed }) {
+function GlobeStage({ ref, slotRef, onFeed, onSelectFire, onHoverFire }) {
   const containerRef = useRef(null);
   const globeRef = useRef(null);
+  const onSelectFireRef = useRef(onSelectFire);
+  const onHoverFireRef = useRef(onHoverFire);
+  useEffect(() => {
+    onSelectFireRef.current = onSelectFire;
+  }, [onSelectFire]);
+  useEffect(() => {
+    onHoverFireRef.current = onHoverFire;
+  }, [onHoverFire]);
 
   // Resolves to the controller once the globe exists, or null if it never will (e.g. no token).
   const [created] = useState(() => {
@@ -44,6 +52,8 @@ function GlobeStage({ ref, slotRef, onFeed }) {
             container: containerRef.current,
             slot: slotRef.current,
             onFeed,
+            onSelectFire: (hit) => onSelectFireRef.current?.(hit),
+            onHoverFire: (hit) => onHoverFireRef.current?.(hit),
           });
           created.settle(globeRef.current);
         })
@@ -68,6 +78,9 @@ function GlobeStage({ ref, slotRef, onFeed }) {
       returnToOrbit: async () => (await created.promise)?.back() ?? false,
       setViewMode: async (mode) => (await created.promise)?.setView(mode) ?? false,
       updateHotspots: (points, country) => globeRef.current?.updateHotspots(points, country),
+      updateTrackerOverlay: (overlay) => globeRef.current?.updateTrackerOverlay(overlay),
+      focusFire: (target) => globeRef.current?.focusFire(target),
+      resetCountryView: (bbox) => globeRef.current?.resetCountryView(bbox),
     }),
     [created],
   );
