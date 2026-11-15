@@ -13,6 +13,7 @@ export async function POST(request) {
     context_detections: contextDetections = [],
     include_hazard: includeHazard = true,
     include_prediction: includePrediction = false,
+    use_hindcast_snapshot: useHindcastSnapshot = false,
     data_source: dataSource = "NRT",
   } = payload || {};
 
@@ -20,11 +21,16 @@ export async function POST(request) {
     return Response.json({ error: "fire_event with fire summary is required" }, { status: 400 });
   }
 
+  const predictionTarget =
+    (useHindcastSnapshot || fireEvent.is_past) && fireEvent.hindcast?.earlyFireEvent?.fire
+      ? fireEvent.hindcast.earlyFireEvent
+      : fireEvent;
+
   try {
     const [hazard, predictionGeoJson] = await Promise.all([
       includeHazard ? calculateHazardForFire(fireEvent).catch(() => null) : null,
       includePrediction
-        ? predictSingleFireEvent(fireEvent, contextDetections, { dataSource }).catch(() => null)
+        ? predictSingleFireEvent(predictionTarget, contextDetections, { dataSource }).catch(() => null)
         : null,
     ]);
 

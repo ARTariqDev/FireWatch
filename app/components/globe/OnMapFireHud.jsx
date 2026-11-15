@@ -33,6 +33,10 @@ export default function OnMapFireHud({
   selectedFireEvent = null,
   isLoadingModels = false,
   hoveredHit = null,
+  fireListScope = "recent",
+  onChangeFireListScope,
+  recentCount = 0,
+  pastCount = 0,
   onSelectFire,
   onFocusFire,
   onClearFire,
@@ -93,6 +97,12 @@ export default function OnMapFireHud({
   const f = selectedFireEvent?.fire || null;
   const hazard = selectedFireEvent?.hazard || null;
   const prediction = selectedFireEvent?.prediction || null;
+  const hindcast = selectedFireEvent?.hindcast || null;
+  const isPastFire = Boolean(selectedFireEvent?.is_past);
+  const showActualVsPredicted =
+    isPastFire ||
+    (Boolean(hindcast?.isMultiPass) &&
+      Number(hindcast?.actualFinalAreaKm2) > Number(hindcast?.initialAreaKm2));
 
   const currentArea = f
     ? Math.max(Number(prediction?.current_area_km2 ?? f.area_km2) || 0.18, 0.14)
@@ -106,6 +116,20 @@ export default function OnMapFireHud({
     : 0;
   const outerBoundArea = f
     ? Number((currentArea + (prediction?.additional_area_p90_km2 ?? m3.p90)).toFixed(2))
+    : 0;
+  const initialArea = f
+    ? Math.max(
+        Number(hindcast?.initialAreaKm2 ?? prediction?.current_area_km2 ?? f.area_km2) || 0.18,
+        0.14
+      )
+    : 0;
+  const actualArea = f
+    ? Math.max(Number(hindcast?.actualFinalAreaKm2 ?? f.area_km2) || initialArea, initialArea)
+    : 0;
+  const predictedArea = f
+    ? prediction?.predicted_total_area_km2 != null
+      ? Number(prediction.predicted_total_area_km2)
+      : projectedArea
     : 0;
 
   return (
@@ -167,12 +191,34 @@ export default function OnMapFireHud({
       <div className="on-map-fire-hud" aria-label="On-map fire spread and hazard controls">
         {!f ? (
           <div className="map-quickpick-bar">
+            {onChangeFireListScope && (recentCount > 0 || pastCount > 0) && (
+              <div className="map-scope-switch" role="group" aria-label="Fire age scope">
+                <button
+                  type="button"
+                  className={`map-scope-btn ${fireListScope === "recent" ? "is-active" : ""}`}
+                  onClick={() => onChangeFireListScope("recent")}
+                >
+                  RECENT ({recentCount})
+                </button>
+                <button
+                  type="button"
+                  className={`map-scope-btn ${fireListScope === "past" ? "is-active" : ""}`}
+                  onClick={() => onChangeFireListScope("past")}
+                >
+                  PAST 14D ({pastCount})
+                </button>
+              </div>
+            )}
             <div className="map-quickpick-prompt">
               <span className="map-quickpick-dot" aria-hidden="true" />
               <span>
                 {sortedEvents.length > 0
-                  ? "Click any hotspot on the map to see its spread & hazard"
-                  : "No ≤12h tracked fires in this feed"}
+                  ? fireListScope === "past"
+                    ? "Pick a past fire to compare Actual vs. Predicted spread"
+                    : "Click any hotspot on the map to see its spread & hazard"
+                  : fireListScope === "past"
+                    ? "No past tracked fires in this filter window"
+                    : "No ≤12h tracked fires in this feed"}
               </span>
             </div>
             {sortedEvents.length > 0 && (
@@ -206,7 +252,9 @@ export default function OnMapFireHud({
           <div className="map-spread-card">
             <div className="map-spread-head">
               <div>
-                <span className="map-spread-eyebrow">ON-MAP SPREAD &amp; HAZARD</span>
+                <span className="map-spread-eyebrow">
+                  {isPastFire ? "PAST FIRE · ACTUAL VS. PREDICTED SPREAD" : "ON-MAP SPREAD & HAZARD"}
+                </span>
                 <h3 className="map-spread-title">
                   Fire #{f.fire_final} ·{" "}
                   {f.province && f.province !== "outside_pakistan"
@@ -287,10 +335,39 @@ export default function OnMapFireHud({
             )}
 
             <div className="map-spread-metrics">
-              <div className="map-metric-cell">
-                <span>CURRENT SPREAD</span>
-                <strong>{num(currentArea, 2)} km²</strong>
-              </div>
+              {showActualVsPredicted ? (
+                <>
+                  <div className="map-metric-cell map-metric-actual">
+                    <span>ACTUAL SPREAD</span>
+                    <strong>{num(actualArea, 2)} km²</strong>
+                  </div>
+                  <div className="map-metric-cell map-metric-pred">
+                    <span>MODEL PREDICTED</span>
+                    <strong>
+                      {prediction ? `${num(predictedArea, 2)} km²` : isLoadingModels ? "Scoring…" : "—"}
+                    </strong>
+                  </div>
+                  <div className="map-metric-cell">
+                    <span>INITIAL PASS (T0)</span>
+                    <strong>{num(initialArea, 2)} km²</strong>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="map-metric-cell">
+                    <span>CURRENT SPREAD</span>
+                    <strong>{num(currentArea, 2)} km²</strong>
+                  </div>
+                  <div className="map-metric-cell">
+                    <span>{hasExpansionArea ? "PREDICTED TOTAL" : "MODEL-3 ENVELOPE"}</span>
+                    <strong>{num(projectedArea, 2)} km²</strong>
+                  </div>
+                  <div className="map-metric-cell">
+                    <span>90% SPREAD BOUND</span>
+                    <strong>{num(outerBoundArea, 2)} km²</strong>
+                  </div>
+                </>
+              )}
               <div className="map-metric-cell">
                 <span>PERSIST (12–24H)</span>
                 <strong>{pct(prediction?.persistence_probability)}</strong>
@@ -300,14 +377,6 @@ export default function OnMapFireHud({
                 <strong>{pct(prediction?.expansion_probability)}</strong>
               </div>
               <div className="map-metric-cell">
-                <span>{hasExpansionArea ? "PREDICTED TOTAL" : "MODEL-3 ENVELOPE"}</span>
-                <strong>{num(projectedArea, 2)} km²</strong>
-              </div>
-              <div className="map-metric-cell">
-                <span>90% SPREAD BOUND</span>
-                <strong>{num(outerBoundArea, 2)} km²</strong>
-              </div>
-              <div className="map-metric-cell">
                 <span>OBSERVATIONS</span>
                 <strong>
                   {f.n_det} det · {f.n_passes}p · {num(f.frp_sum, 1)} MW
@@ -315,10 +384,33 @@ export default function OnMapFireHud({
               </div>
             </div>
 
+            {selectedFireEvent?.context && (
+              <div className="map-context-pill" title="14-day harmonized MODIS-equivalent regional baseline">
+                <span>14d Baseline</span>
+                <strong>
+                  {selectedFireEvent.context.anomalyRatio != null
+                    ? `${num(selectedFireEvent.context.anomalyRatio, 2)}× median`
+                    : "n/a"}
+                  {selectedFireEvent.context.percentile != null
+                    ? ` · P${Math.round(selectedFireEvent.context.percentile)}`
+                    : ""}
+                  {selectedFireEvent.context.modisEquivalent != null
+                    ? ` · ${num(selectedFireEvent.context.modisEquivalent, 1)} MODIS-eq`
+                    : ""}
+                </strong>
+              </div>
+            )}
+
             <div className="map-ring-key" aria-label="Map spread ring legend">
               <span>
-                <i className="ring-swatch ring-current" /> Current Spread
+                <i className="ring-swatch ring-current" />{" "}
+                {showActualVsPredicted ? "Initial Pass (t0)" : "Current Spread"}
               </span>
+              {showActualVsPredicted && (
+                <span>
+                  <i className="ring-swatch ring-actual" /> Actual Spread
+                </span>
+              )}
               <span>
                 <i
                   className={`ring-swatch ${
@@ -327,7 +419,7 @@ export default function OnMapFireHud({
                       : "ring-predicted"
                   }`}
                 />{" "}
-                12–24h Spread
+                {showActualVsPredicted ? "Predicted Spread" : "12–24h Spread"}
               </span>
               <span>
                 <i className="ring-swatch ring-outer" /> 90% Bound

@@ -41,11 +41,59 @@ function formatPredictionStatus(status) {
   return status ? String(status).toUpperCase() : "UNAVAILABLE";
 }
 
+const CIVIDIS_STOPS = [
+  "#131f3b",
+  "#233e6c",
+  "#4c566d",
+  "#7a7b78",
+  "#af9e56",
+  "#fee838",
+];
+
+function cividisColor(value, maxVal) {
+  if (!maxVal || value <= 0) return "#181512";
+  const ratio = Math.min(1, Math.max(0, value / maxVal));
+  const idx = Math.min(
+    CIVIDIS_STOPS.length - 1,
+    Math.max(0, Math.round(ratio * (CIVIDIS_STOPS.length - 1))),
+  );
+  return CIVIDIS_STOPS[idx];
+}
+
+function csvCell(value) {
+  if (value === null || value === undefined) return "";
+  const str = String(value);
+  if (/[",\n\r]/.test(str)) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
+function triggerCsvDownload(filename, content) {
+  if (typeof window === "undefined") return;
+  const blob = new Blob([content], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.setAttribute("download", filename);
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
 export default function FireInspectorPanel({
   iso3,
   activeTab,
   tabData,
+  harmonization = null,
+  rawPoints = [],
   sortedEvents: passedSortedEvents,
+  fireListScope = "recent",
+  onChangeFireListScope,
+  selectedDay = null,
+  onSelectDay,
+  isHistoricalWindow = false,
   onDemandCache = {},
   selectedFireId,
   onSelectFire,
@@ -53,14 +101,16 @@ export default function FireInspectorPanel({
   generatedAt,
 }) {
   const fireEvents = useMemo(() => tabData?.fire_events || [], [tabData?.fire_events]);
+  const pastEvents = useMemo(() => tabData?.past_fire_events || [], [tabData?.past_fire_events]);
   const modelSummary = tabData?.modelSummary || null;
   const metadata = tabData?.metadata || {};
 
   const sortedEvents = useMemo(() => {
-    if (Array.isArray(passedSortedEvents) && passedSortedEvents.length) {
+    if (Array.isArray(passedSortedEvents)) {
       return passedSortedEvents;
     }
-    return [...fireEvents].sort((a, b) => {
+    const baseList = fireListScope === "past" ? pastEvents : fireEvents;
+    return [...baseList].sort((a, b) => {
       const expA = a.prediction?.prediction_status === "expansion_likely" ? 1 : 0;
       const expB = b.prediction?.prediction_status === "expansion_likely" ? 1 : 0;
       if (expB !== expA) return expB - expA;
@@ -69,19 +119,17 @@ export default function FireInspectorPanel({
       if (hazB !== hazA) return hazB - hazA;
       return Number(b.fire?.frp_sum || 0) - Number(a.fire?.frp_sum || 0);
     });
-  }, [passedSortedEvents, fireEvents]);
+  }, [passedSortedEvents, fireEvents, pastEvents, fireListScope]);
 
   const activeFireEvent = useMemo(() => {
-    if (!sortedEvents.length) return null;
-    if (selectedFireId !== null && selectedFireId !== undefined) {
-      return (
-        sortedEvents.find(
-          (e) => String(e.fire?.fire_final) === String(selectedFireId),
-        ) || null
-      );
-    }
-    return null;
-  }, [sortedEvents, selectedFireId]);
+    if (selectedFireId === null || selectedFireId === undefined) return null;
+    return (
+      sortedEvents.find((e) => String(e.fire?.fire_final) === String(selectedFireId)) ||
+      fireEvents.find((e) => String(e.fire?.fire_final) === String(selectedFireId)) ||
+      pastEvents.find((e) => String(e.fire?.fire_final) === String(selectedFireId)) ||
+      null
+    );
+  }, [sortedEvents, fireEvents, pastEvents, selectedFireId]);
 
   const activeFireId = activeFireEvent?.fire?.fire_final;
   const cacheKey = `${iso3 || ""}:${generatedAt || ""}:${activeTab}:${activeFireId ?? ""}`;
@@ -116,6 +164,84 @@ export default function FireInspectorPanel({
   const showModelSections = Boolean(
     activeTab === "viirs" || hasViirsSupport || resolvedHazard || resolvedPrediction,
   );
+  const harmSummary = harmonization?.summary || null;
+  const harmValidation = harmonization?.validation || null;
+  const harmDaily = useMemo(() => harmonization?.dailySeries || [], [harmonization?.dailySeries]);
+  const maxDailyModisEq = useMemo(
+    () => Math.max(0, ...harmDaily.map((d) => Number(d.modisEquivalent) || 0)),
+    [harmDaily],
+  );
+  const eventContext = activeFireEvent?.context || harmonization?.context || null;
+
+  const handleExportHotspotsCsv = () => {
+    const headerNote = [
+      `# Methods Note: Layer B Event Fusion (1.0 km geodesic, +/-4-5.5h drift-adaptive coincidence gate)`,
+      `# Region: ${iso3 || "UNKNOWN"} | Tab: ${activeTab} | Generated: ${generatedAt || new Date().toISOString()}`,
+      `# Filters: MODIS >= 30%, VIIRS nominal+high | Window: <=12h display from 14d tracker`,
+      harmSummary
+        ? `# Baseline: Median ${harmSummary.median14d} MODIS-eq cell-days (14d) | Unit: ${harmSummary.unit}`
+        : `# Baseline: N/A`,
+    ];
+    const columns = "longitude,latitude,frp_mw,sensor,satellite,confidence,acq_datetime_utc,tier,fire_final";
+    const rows = (rawPoints || []).map((pt) => {
+      const tierLabel =
+        pt[6] === 1
+          ? "Tier 4 (Inactive)"
+          : pt[8] === 1
+            ? "Tier 1 (Dual)"
+            : pt[8] === 2
+              ? "Tier 2 (VIIRS Solo)"
+              : "Tier 3 (MODIS Solo)";
+      const isoTime = Number.isFinite(pt[5]) ? new Date(pt[5]).toISOString() : "";
+      return [
+        csvCell(pt[0]),
+        csvCell(pt[1]),
+        csvCell(pt[2]),
+        csvCell(pt[3] === 0 ? "MODIS" : "VIIRS"),
+        csvCell(pt[10] ?? ""),
+        csvCell(pt[9] ?? ""),
+        csvCell(isoTime),
+        csvCell(tierLabel),
+        csvCell(pt[12] ?? ""),
+      ].join(",");
+    });
+    triggerCsvDownload(
+      `firewatch-${(iso3 || "region").toLowerCase()}-hotspots-${activeTab}.csv`,
+      [...headerNote, columns, ...rows].join("\n"),
+    );
+  };
+
+  const handleExportSeriesCsv = () => {
+    if (!harmDaily.length) return;
+    const headerNote = [
+      `# Methods Note: Layer A Statistical Harmonization (1 km ~0.009 deg hotspot-cell-day binning)`,
+      `# Region: ${iso3 || "UNKNOWN"} | Reference Unit: ${harmSummary?.unit || "MODIS-equivalent cell-days"}`,
+      `# Consistency Filter: MODIS >= 30%, VIIRS nominal+high | Afternoon ~13:30 share: ${Math.round((harmSummary?.filterStats?.afternoonShare ?? 0) * 100)}%`,
+      `# Validation (LOO-CV): Method=${harmValidation?.method || "N/A"}, MAE=${harmValidation?.mae ?? "N/A"}, RMSE=${harmValidation?.rmse ?? "N/A"}, Bias=${harmValidation?.bias ?? "N/A"}, Quality=${harmValidation?.qualityFlag || "N/A"}`,
+      `# Baseline (14d): Median=${harmSummary?.median14d ?? 0}, IQR=${harmSummary?.iqr14d ?? 0}`,
+    ];
+    const columns =
+      "date_utc,observed_modis_cell_days,raw_viirs_cell_days,calibrated_viirs,modis_equivalent,pi90_lower,pi90_upper,source,frp_sum_mw,afternoon_share,drift_detected";
+    const rows = harmDaily.map((d) =>
+      [
+        csvCell(d.date),
+        csvCell(d.modisCellDays),
+        csvCell(d.viirsCellDays),
+        csvCell(d.calibratedViirs),
+        csvCell(d.modisEquivalent),
+        csvCell(d.interval?.[0] ?? 0),
+        csvCell(d.interval?.[1] ?? 0),
+        csvCell(d.source),
+        csvCell(d.totalFrpSum ?? 0),
+        csvCell(d.afternoonShare ?? ""),
+        csvCell(d.driftDetected ? "true" : "false"),
+      ].join(","),
+    );
+    triggerCsvDownload(
+      `firewatch-${(iso3 || "region").toLowerCase()}-harmonized-14d.csv`,
+      [...headerNote, columns, ...rows].join("\n"),
+    );
+  };
 
   return (
     <div className="tracker-models-panel">
@@ -196,21 +322,168 @@ export default function FireInspectorPanel({
         </div>
       )}
 
+      {(activeTab === "combined" || activeTab === "viirs") && harmSummary && (
+        <div className="harm-baseline-section" aria-label="Statistical Harmonization and 14-Day Baseline">
+          <div className="model-section-header">
+            <span className="model-section-title">HARMONIZED 14D BASELINE (LAYER A)</span>
+            <span className="model-version-tag">
+              MODIS-EQ · {String(harmValidation?.qualityFlag || "low").toUpperCase()}
+            </span>
+          </div>
+
+          <div className="harm-headline-grid">
+            <div className="harm-kpi">
+              <span>TODAY (MODIS-EQ)</span>
+              <strong>
+                {num(harmSummary.latestModisEquivalent, 1)}{" "}
+                <small>
+                  [{num(harmSummary.latestInterval?.[0], 1)}–{num(harmSummary.latestInterval?.[1], 1)}]
+                </small>
+              </strong>
+              <em>1 km cell-days · 90% PI</em>
+            </div>
+            <div className="harm-kpi">
+              <span>VS 14D MEDIAN ({num(harmSummary.median14d, 1)})</span>
+              <strong>
+                {harmSummary.anomalyRatio !== null
+                  ? `${num(harmSummary.anomalyRatio, 2)}×`
+                  : harmSummary.latestModisEquivalent > 0
+                    ? "ABOVE 0 MED"
+                    : "1.00×"}{" "}
+                <small>P{harmSummary.percentile}</small>
+              </strong>
+              <em>
+                {harmSummary.anomalyDelta >= 0 ? "+" : ""}
+                {num(harmSummary.anomalyDelta, 1)} cell-days · IQR {num(harmSummary.iqr14d, 1)}
+              </em>
+            </div>
+          </div>
+
+          {harmDaily.length > 0 && (
+            <div className="harm-strip-wrap">
+              <div className="harm-strip-head">
+                <span>14-DAY ACTIVITY CALENDAR (CLICK DAY TO FILTER)</span>
+                {selectedDay ? (
+                  <button
+                    type="button"
+                    className="harm-day-clear-btn"
+                    onClick={() => onSelectDay?.(null)}
+                  >
+                    {selectedDay.slice(5)} ×
+                  </button>
+                ) : (
+                  <span>
+                    {harmDaily[0]?.date?.slice(5)} → {harmDaily[harmDaily.length - 1]?.date?.slice(5)}
+                  </span>
+                )}
+              </div>
+              <div className="harm-strip" role="group" aria-label="14-day MODIS-equivalent activity calendar">
+                {harmDaily.map((day) => {
+                  const isUncertain =
+                    day.source === "calibrated_viirs" || harmValidation?.qualityFlag === "low_sparse";
+                  const isDaySelected = selectedDay === day.date;
+                  return (
+                    <button
+                      key={day.date}
+                      type="button"
+                      className={`harm-cell ${isUncertain ? "is-uncertain" : ""} ${isDaySelected ? "is-day-selected" : ""}`}
+                      style={{ backgroundColor: cividisColor(day.modisEquivalent, maxDailyModisEq) }}
+                      onClick={() => onSelectDay?.(day.date)}
+                      aria-pressed={isDaySelected}
+                      title={`${day.date} (click to filter) · MODIS-eq ${day.modisEquivalent} [90% PI ${day.interval?.[0]}–${day.interval?.[1]}] | Obs MODIS ${day.modisCellDays} | Raw VIIRS ${day.viirsCellDays} (${day.source})`}
+                    />
+                  );
+                })}
+              </div>
+              <div className="harm-strip-foot">
+                <span>Low (0)</span>
+                <span className="cividis-bar" aria-hidden="true" />
+                <span>Peak ({num(maxDailyModisEq, 1)})</span>
+              </div>
+            </div>
+          )}
+
+          <div className="harm-meta-row">
+            <span>
+              Transfer: ×{harmValidation?.transferRatio ?? "—"} ({harmValidation?.method || "prior"}) ·
+              LOO MAE {harmValidation?.mae ?? "—"} / Bias {harmValidation?.bias ?? "—"}
+            </span>
+            <span>
+              ~13:30 pass: {Math.round((harmSummary.filterStats?.afternoonShare ?? 0) * 100)}% ·{" "}
+              {harmSummary.filterStats?.driftDetected
+                ? "Orbital drift (±5.5h gate)"
+                : "Nominal timing (±4h)"}
+            </span>
+          </div>
+
+          <div className="harm-export-row">
+            <button
+              type="button"
+              className="harm-export-btn"
+              onClick={handleExportHotspotsCsv}
+              disabled={!rawPoints?.length}
+            >
+              ↓ Hotspots CSV
+            </button>
+            <button
+              type="button"
+              className="harm-export-btn"
+              onClick={handleExportSeriesCsv}
+              disabled={!harmDaily.length}
+            >
+              ↓ 14d Series CSV
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="tracked-fires-section">
+        <div className="fire-scope-switch" role="tablist" aria-label="Fire event list timeframe">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={fireListScope === "recent"}
+            className={`fire-scope-btn ${fireListScope === "recent" ? "is-active" : ""}`}
+            onClick={() => onChangeFireListScope?.("recent")}
+          >
+            RECENT (≤12H) · {fireEvents.length}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={fireListScope === "past"}
+            className={`fire-scope-btn ${fireListScope === "past" ? "is-active" : ""}`}
+            onClick={() => onChangeFireListScope?.("past")}
+          >
+            PAST FIRES (14D) · {pastEvents.length}
+          </button>
+        </div>
+
         <div className="model-section-header">
-          <span className="model-section-title">RECENT TRACKED FIRES (≤12H)</span>
+          <span className="model-section-title">
+            {isHistoricalWindow
+              ? "MATCHED FIRES IN WINDOW"
+              : fireListScope === "past"
+                ? "PAST TRACKED FIRES (ACTUAL VS PREDICTED)"
+                : "RECENT TRACKED FIRES (≤12H)"}
+          </span>
           <span className="model-count-tag">{sortedEvents.length} EVENTS</span>
         </div>
 
         {sortedEvents.length === 0 ? (
-          <p className="hud-note">No tracked fires detected within the last 12 hours for this feed.</p>
+          <p className="hud-note">
+            {fireListScope === "past"
+              ? "No past tracked fires match the active filter."
+              : "No tracked fires match the current filter in this feed."}
+          </p>
         ) : (
-          <ul className="tracked-fire-list" role="listbox" aria-label="Recent tracked fires">
-            {sortedEvents.map((event) => {
+          <ul className="tracked-fire-list" role="listbox" aria-label="Tracked fires">
+            {sortedEvents.slice(0, 60).map((event) => {
               const fire = event.fire;
               const isSelected = String(fire.fire_final) === String(activeFireId);
               const haz = event.hazard;
               const pred = event.prediction;
+              const hc = event.hindcast;
               return (
                 <li key={fire.fire_final}>
                   <button
@@ -240,6 +513,11 @@ export default function FireInspectorPanel({
                       <span>{num(fire.frp_sum, 1)} MW</span>
                       <span>·</span>
                       <span>{fire.n_det} det / {fire.n_passes}p</span>
+                      {event.is_past && hc?.isMultiPass && (
+                        <span className="pred-chip pred-actual">
+                          ACTUAL +{num(hc.actualAddAreaKm2, 2)} km²
+                        </span>
+                      )}
                       {pred && (
                         <span
                           className={`pred-chip ${
@@ -330,6 +608,63 @@ export default function FireInspectorPanel({
             <span>SATELLITES: {(f.satellites || []).join(", ") || "—"}</span>
             {f.merges_in > 0 && <span>MERGES: {f.merges_in}</span>}
           </div>
+
+          {activeFireEvent?.is_past && activeFireEvent?.hindcast && (
+            <div className="hindcast-compare-box" aria-label="Actual versus model predicted spread">
+              <div className="inspector-subhead">
+                <span className="inspector-sublabel">ACTUAL VS. PREDICTED SPREAD (HINDCAST)</span>
+                <span className="hindcast-badge">
+                  {activeFireEvent.hindcast.persisted
+                    ? `PERSISTED (${activeFireEvent.hindcast.totalPasses} PASSES)`
+                    : "SINGLE PASS"}
+                </span>
+              </div>
+              <div className="ml-area-grid">
+                <div className="inspector-kv">
+                  <span>INITIAL PASS (T0)</span>
+                  <strong>{num(activeFireEvent.hindcast.initialAreaKm2, 2)} km²</strong>
+                </div>
+                <div className="inspector-kv hindcast-actual-cell">
+                  <span>ACTUAL SPREAD</span>
+                  <strong>{num(activeFireEvent.hindcast.actualFinalAreaKm2, 2)} km²</strong>
+                </div>
+                <div className="inspector-kv hindcast-pred-cell">
+                  <span>MODEL PREDICTED</span>
+                  <strong>
+                    {resolvedPrediction
+                      ? `${num(resolvedPrediction.predicted_total_area_km2, 2)} km²`
+                      : isLoadingHazard
+                        ? "Scoring..."
+                        : "—"}
+                  </strong>
+                </div>
+                <div className="inspector-kv">
+                  <span>ACTUAL GROWTH</span>
+                  <strong>+{num(activeFireEvent.hindcast.actualAddAreaKm2, 2)} km²</strong>
+                </div>
+              </div>
+              {resolvedPrediction && (
+                <p className="hindcast-outcome-note">
+                  Persistence: <strong>{activeFireEvent.hindcast.persisted ? "Yes" : "No"}</strong>{" "}
+                  (Model 1: {pct(resolvedPrediction.persistence_probability)}) · Expansion{" "}
+                  ≥1km²/25%: <strong>{activeFireEvent.hindcast.expandedActual ? "Yes" : "No"}</strong>{" "}
+                  (Model 2: {pct(resolvedPrediction.expansion_probability)})
+                </p>
+              )}
+            </div>
+          )}
+
+          {eventContext && (
+            <div className="context-baseline-pill">
+              <span>14D REGIONAL CONTEXT</span>
+              <strong>
+                {eventContext.anomalyRatio !== null
+                  ? `${num(eventContext.anomalyRatio, 2)}× median`
+                  : "Above zero median"}{" "}
+                · P{eventContext.percentile} · {num(eventContext.modisEquivalent, 1)} MODIS-eq
+              </strong>
+            </div>
+          )}
 
           {lcTotal > 0 && (
             <div className="land-cover-wrap">

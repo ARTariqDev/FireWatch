@@ -47,7 +47,7 @@ function queryInteractiveFeature(map, event, layers) {
 }
 
 export function bindHotspotInteractions(map, { onSelectFire, onHoverFire } = {}) {
-  if (!map || typeof map.on !== "function") return () => {};
+  if (!map || typeof map.on !== "function") return () => { };
 
   const existingLayers = () => INTERACTIVE_LAYERS.filter((id) => Boolean(map.getLayer?.(id)));
 

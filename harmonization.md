@@ -1,172 +1,149 @@
-# MODIS & VIIRS Multi-Sensor Harmonization System
+# MODIS & VIIRS Harmonization Architecture
 
-This document outlines the architecture, mathematical principles, and operational workflow of the multi-sensor satellite fire harmonization system implemented in this platform.
-
----
-
-## 1. System Overview & The Core Challenge
-
-Satellite wildfire tracking relies primarily on two sensor suites operated by NASA and NOAA:
-1. **MODIS (Moderate Resolution Imaging Spectroradiometer)**:
-   - Flying onboard **Terra** (~10:30 AM local solar time morning pass) and **Aqua** (~13:30 PM afternoon pass).
-   - Nominal nadir spatial resolution: **1 km**.
-2. **VIIRS (Visible Infrared Imaging Radiometer Suite)**:
-   - Flying onboard **S-NPP**, **NOAA-20**, and **NOAA-21** (~13:30 PM afternoon pass, near-coincident with Aqua).
-   - High-resolution active fire band (I-Band 375m) spatial resolution: **375 m**.
-
-### Why Naive Harmonization Fails
-A common naive suggestion is to subdivide a single $1\text{ km} \times 1\text{ km}$ MODIS pixel into a $3 \times 3$ grid of nine $350\text{ m}$ sub-pixels and display those. **This system explicitly rejects artificial sub-pixel splitting** for critical physical and scientific reasons:
-- **Radiometric Reality**: An active fire covering just $100\text{ m}^2$ (0.01% of a $1\text{ km}^2$ MODIS footprint) emits enough Fire Radiative Power (FRP) to trigger a 1 km MODIS detection. Decomposing that detection into 9 separate points creates **8 artificial "ghost fires"** where no thermal anomaly exists.
-- **Surface Area Distortion**: It inflates active fire counts and calculated burned acreage by up to $900\%$.
-- **The Physical Approach**: Instead of synthesizing phantom geometry, the system treats MODIS as an uncertainty footprint and leverages coincident VIIRS passes to **naturally resolve and anchor** the true fire front to high-accuracy 375m coordinates.
+This document defines how `modis-viirs` reconciles **MODIS (`~1 km`)** and **VIIRS (`~375 m`)** active fire detections across NASA FIRMS feeds, avoiding physical pixel-splitting distortions while supporting **regional trend comparability (Layer A)**, **real-time fire tracking & VIIRS Python ML inference (Layer B)**, **interactive timeline/tier filtering**, and **past-fire hindcast validation (`t0` predicted vs. actual spread)**.
 
 ---
 
-## 2. Multi-Sensor Fusion Pipeline (`lib/harmonization.js`)
+## 1. Why Naive Spatial Alignment Fails
 
-```
-                 NASA FIRMS Telemetry Stream
-                              │
-            ┌─────────────────┴─────────────────┐
-            ▼                                   ▼
-      MODIS (1 km)                        VIIRS (375 m)
-     Terra & Aqua                     S-NPP, NOAA-20/21
-            │                                   │
-            └─────────────────┬─────────────────┘
-                              ▼
-                 Geodesic Distance Matching
-              (Haversine threshold: 1.0 km)
-                              │
-                              ▼
-                  Temporal Coincidence Gate
-              (Overpass window: ±4 hours)
-                              │
-            ┌─────────────────┴─────────────────┐
-            ▼                                   ▼
-    [Spatial Overlap]                   [No Coincidence]
-VIIRS anchors coordinates           Retained as solo detection
-MODIS preserved in `matches`        Tier 2 (VIIRS) or Tier 3 (MODIS)
-Assigned Tier 1 (Dual-Confirmed)
+Splitting a `1 km` MODIS pixel into seven `375 m` VIIRS sub-pixels—or downscaling MODIS brightness temperature/FRP linearly by pixel area—introduces severe physical errors:
+
+1. **Non-linear Detection Probability**: VIIRS's `~375 m` I-band resolves small, low-intensity, or cooler sub-pixel fires that remain below MODIS's `~1 km` detection threshold. Multiplying or dividing pixel counts ignores sensor sensitivity differences.
+2. **MODIS Bow-Tie Growth**: Off-nadir MODIS scan geometry stretches ground pixels toward scan edges (`up to ~2 km × 5 km`), inflating apparent spatial overlap without uniform sub-pixel intensity.
+3. **FRP Summation Bias**: VIIRS fire radiative power (FRP) sums differently than MODIS because sub-pixel background temperature subtraction differs by swath footprint.
+
+---
+
+## 2. Adopted Hybrid Two-Layer Strategy
+
+Following an evaluation of the two-layer harmonization framework against the project's live **14-day FIRMS ingestion → tracker tabs → interactive 14-day/24h timeline & tier filtering → VIIRS-calibrated Python ML & hindcast** workflow:
+
+- **Full archival 25-year Layer A** (`MODIS 2001+` vs `VIIRS 2012+`) cannot run directly inside FIRMS's rolling **14-day** API window.
+- Instead, we run **Layer A over the 14-day ingested FIRMS window** (`lib/statistical-harmonization.js`) and fuse it with **Layer B operational fire tracking** (`lib/harmonization.js`), **interactive point + event synchronization** (`lib/hotspot-data.js`, `TimelineControls.jsx`, `Hero.jsx`), and **VIIRS-isolated Python ML forecasts & `t0` hindcasts** (`lib/fire-models.js`, `lib/hotspots.js`, `layers.js`).
+
+```text
+FIRMS 14-Day Detections (MODIS + VIIRS, dataset-anchored via itemAcquiredMs)
+  │
+  ├──► Layer A: Statistical & Baseline Engine (lib/statistical-harmonization.js)
+  │      ├─ Cross-sensor consistency filter (MODIS >= 30%, VIIRS nominal/high)
+  │      ├─ Solar-local overpass family & orbital drift detection (~13:30 Aqua/S-NPP/N20 vs Terra/night)
+  │      ├─ Grid binning into 1 km (~0.009°) & 0.25° hotspot-cell-days
+  │      ├─ Overlap transfer fit (log-linear VIIRS -> MODIS-eq + 0.34 empirical prior + LOO-CV + 90% PI)
+  │      └─ 14d robust baseline (prior-day median, IQR, anomalyRatio, percentile -> event context)
+  │
+  ├──► Layer B: Operational Fire Fusion & Tracking (lib/harmonization.js + lib/fire-models.js)
+  │      ├─ Separate 14-day tracker runs (combined, viirs, modis) -> recentFireEvents (<=12h) & pastFireEvents (>12h)
+  │      ├─ Geodesic 1.0 km + adaptive ±4.0h / ±5.5h drift-aware coincidence matching
+  │      ├─ Ordinal confidence tiers (Tier 1 > Tier 2 > Tier 3 > Tier 4) + 95% Wilson CIs
+  │      ├─ 13-element harmonized points (<=12h points & 14d points14d linked via fireId)
+  │      └─ VIIRS ML & Hazard isolated to VIIRS-evidenced fires (+ t0 hindcasts for past fires)
+  │
+  └──► Synchronized Map & HUD Filtering (TimelineControls.jsx + Hero.jsx + layers.js)
+         ├─ 5-step Harmonization Filter (all / moderate+ / viirs+dual / high+dual / dual only)
+         ├─ 24-hour scrubber, UTC calendar presets/ranges, & clickable 14-day Cividis day cells
+         └─ On-map & sidebar Past Fire Hindcast comparison (Initial Pass t0 vs Actual vs Predicted Spread)
 ```
 
-### 1. Spatial Coordinate Anchoring
-- **Haversine Distance**: When a VIIRS detection falls within $1.0\text{ km}$ of a MODIS detection, they are identified as the same physical fire front.
-- **Resolution Pinning**: The event is pinned to the **$375\text{ m}$ VIIRS coordinates**, eliminating the positional ambiguity of MODIS's coarse pixel.
-- **Zero Data Loss**: The overlapping MODIS observation is not discarded from the analytical record. Its raw coordinates, FRP, acquisition timestamp, satellite platform, and detection confidence are preserved in `point.matches` and stored in the fire event's observation history.
+---
 
-### 2. Overpass Timing & Reading Delays
-- **Terra (MODIS)** sweeps at ~10:30 AM local time, establishing the morning baseline.
-- **Aqua (MODIS)** and **VIIRS (NOAA/SNPP)** sweep at ~13:30 PM local time during peak afternoon fire activity.
-- The harmonization engine applies a **$\pm 4\text{-hour}$ coincidence window**. This captures the 3-hour orbital delta between Terra and Aqua/VIIRS, absorbs near-real-time (NRT) ground processing delays (1–3 hours), and prevents identical fire fronts from being split into duplicate events.
+## 3. Layer A: 14-Day Regional Statistical Harmonization
 
-### 3. Absence of Detection $\neq$ Extinction
-Non-detection by VIIRS following an earlier MODIS pass is **never** treated as automatic fire extinction:
-- Cloud cover, high view angles (swath edges), heavy smoke attenuation, or orbital gaps frequently occlude active fires.
-- A fire front is only marked as extinguished/inactive when persistent clear-sky passes confirm thermal absence or when scrubbing past historical intervals.
+Implemented in [`lib/statistical-harmonization.js`](file:///Users/tariqmahmood/Projects/modis-viirs/lib/statistical-harmonization.js):
+
+1. **Cross-Sensor Consistency Filtering (`aggregateCellDays`)**:
+   - Retains `MODIS >= 30%` confidence and `VIIRS` `nominal` / `high` detections for statistical series construction (`low` or `<30%` detections are excluded from baseline regressions to prevent sensor noise bias while remaining preserved as **Tier 4** points in Layer B for interactive user filtering).
+2. **Solar Overpass & Orbital Drift Classification (`localSolarHour`, `classifyOverpassFamily`)**:
+   - Approximates local solar time (`UTC hour + lon / 15`), grouping passes into `afternoon_1330` (Aqua / Suomi NPP / NOAA-20), `morning_terra`, or `nighttime`, and flags late afternoon Aqua drift (`>14:15` local solar hour).
+3. **Sensor-Neutral `hotspot-cell-day` Binning**:
+   - Deduplicates same-day detections into `1 km` (`0.009°`) grid cells (`modisCellDays`, `viirsCellDays`, `combinedCellDays`) and `0.25°` synoptic cells so clustered `375 m` VIIRS fragments or swath overlaps are normalized per cell per UTC day.
+4. **VIIRS → MODIS-Equivalent Transfer Calibration (`fitOverlapTransferFunction`)**:
+   - Fits a log-linear regression on overlapping active days (`modisCellDays > 0 && viirsCellDays > 0`), blending toward an empirical `0.34` VIIRS-to-MODIS transfer prior under sparse sample sizes.
+   - Computes **Leave-One-Day-Out Cross-Validation (LOO-CV)** metrics (`MAE`, `RMSE`, `bias`, `r2`, and `qualityFlag`) and **90% prediction intervals** (`[low, high]`).
+5. **14-Day Baseline & Anomaly Context (`buildHarmonizationReport`)**:
+   - Computes the baseline over prior days in the 14-day window (excluding the evaluated day): `median`, `iqr`, `anomalyRatio`, `anomalyDelta`, and empirical `percentile`.
+   - Emits a lightweight `context` object (`{ modisEquivalent, median, iqr, anomalyRatio, percentile, unit, qualityFlag }`) attached onto Layer B fire events.
 
 ---
 
-## 3. The 4-Tier Confidence Architecture
+## 4. Layer B: Geodesic Fire Event Fusion & Ordinal Confidence
 
-Every detection is classified into a rigorous 4-tier confidence hierarchy:
+Implemented in [`lib/harmonization.js`](file:///Users/tariqmahmood/Projects/modis-viirs/lib/harmonization.js) and [`lib/hotspots.js`](file:///Users/tariqmahmood/Projects/modis-viirs/lib/hotspots.js):
 
-| Tier | Classification | Confidence Rating | Map Visual Core | Radar Pulse | Description |
-| :---: | :--- | :---: | :--- | :---: | :--- |
-| **Tier 1** | **Dual-Confirmed** | **95% – 100%** | Intense White-Gold (`#fff0b3` → `#ffffff`) | Yes | Coincident cross-satellite validation by both MODIS and VIIRS within the coincidence window. Highest analytical certainty. |
-| **Tier 2** | **VIIRS Solo** | **75% – 90%** | Vivid Orange (`#ff6a32`) | Yes | High-resolution 375m active front detected by VIIRS (S-NPP, NOAA-20, NOAA-21). Default operational view alongside Tier 1. |
-| **Tier 3** | **MODIS Solo** | **30% – 55%** | Ochre / Amber (`#d97706`) | No | Coarse 1km detection unconfirmed by high-resolution pass. Rendered with lower opacity and no pulse rings to minimize false alarm noise. |
-| **Tier 4** | **Put Out / Inactive** | **20% – 25%** | Muted Pale Salmon (`#dfb7a2`) | No | Historical front present in earlier passes but absent in the latest satellite observations. |
-
----
-
-## 4. Fire Event Reconstruction & Catering for the Prediction Workflow
-
-### Deterministic Event Rebuilding (`lib/tracker.js`)
-Individual point detections across passes are grouped into persistent spatio-temporal fire events:
-- **Deterministic Event IDs**: Generated as `fire_${latTag}_${lonTag}_${firstAcquired}` so fire identities persist across browser reloads, filters, and timeline scrubs without requiring a heavy persistent database.
-- **Observation History**: Every event retains the complete chronological sequence of passes:
-  ```json
-  "observations": [
-    {
-      "sensor": "MODIS",
-      "satellite": "Terra",
-      "latitude": 31.5204,
-      "longitude": 74.3582,
-      "frp": 45.2,
-      "confidence": 78,
-      "timestamp": "2026-11-14T05:30:00.000Z"
-    },
-    {
-      "sensor": "VIIRS",
-      "satellite": "NOAA-20",
-      "latitude": 31.5218,
-      "longitude": 74.3591,
-      "frp": 82.6,
-      "confidence": 95,
-      "timestamp": "2026-11-14T08:15:00.000Z"
-    }
-  ]
-  ```
-- **Convex Bounding Footprints**: Spatial clusters generate footprint bounding polygons for spatial perimeter tracking.
-
-### Seamless Machine Learning Integration (`prediction: null`)
-To ensure that downstream predictive models connect cleanly without breaking existing frontend visualizers or data contracts, every fire event is structured with a standardized prediction slot:
-```json
-{
-  "eventId": "fire_31.522N_074.359E_1763118000000",
-  "detectionConfidence": 95,
-  "trackingConfidence": 90,
-  "footprint": { "type": "Polygon", "coordinates": [...] },
-  "observations": [...],
-  "prediction": null
-}
-```
-
-When ML models are deployed, the `prediction` slot is populated directly:
-1. **Model 1 (Persistence Probability)**:
-   - Predicts the probability of the front remaining actively flaming over 6h, 12h, and 24h horizons:
-     ```json
-     "prediction": {
-       "persistence": { "p6h": 0.88, "p12h": 0.65, "p24h": 0.32 }
-     }
-     ```
-2. **Model 2 (Front Expansion & Spread Vector)**:
-   - Provides propagation velocity ($\text{km/h}$), dominant spread bearing ($^\circ$), and 12-hour projected perimeter polygon:
-     ```json
-     "prediction": {
-       "spread": {
-         "speedKmH": 1.4,
-         "headingDeg": 65,
-         "projectedPerimeter": { "type": "Polygon", "coordinates": [...] }
-       }
-     }
-     ```
-3. **Model 3 (Additional Burn Area & Smoke Dispersion)**:
-   - Estimated additional area burned ($\text{km}^2$) and downwind particulate concentration envelope.
-
-Because the data pipelines (`lib/hotspots.js`, `lib/tracker.js`, and `app/components/globe/layers.js`) already consume this event structure, connecting the ML models requires zero schema modifications.
+1. **Adaptive Spatial–Temporal Coincidence (`harmonizeHotspots`)**:
+   - Matches VIIRS and MODIS detections within **`1.0 km`** geodesic distance (Haversine) and nominal **`±4 hours`** (`4 * 3600 * 1000 ms`), automatically widening to **`±5.5 hours`** when `adaptiveDrift: true` detects afternoon orbital drift (`13:30` overpass offset).
+2. **Ordinal Confidence Tiers (Replacing Arbitrary Fixed Percentages)**:
+   - Ranks detections strictly as **`Tier 1 > Tier 2 > Tier 3 > Tier 4`** without claiming invented `95–100%` calibrated probabilities:
+     - **Tier 1 (High Multi-Sensor)**: VIIRS + MODIS corroboration within the coincidence window (`finalTier = 1`).
+     - **Tier 2 (High Single-Sensor)**: Nominal/High VIIRS (`n` / `h`) or high-confidence MODIS (`>= 80%`).
+     - **Tier 3 (Moderate / Unconfirmed)**: Nominal MODIS `30–79%` confidence.
+     - **Tier 4 (Low / Thermal Anomaly Risk)**: Low-confidence VIIRS (`l`) or MODIS `< 30%`, tagged via `!isCrossSensorConsistent(sensor, confidence)`.
+   - **Empirical Validation (`computeEmpiricalTierRates`)**: Computes observed multi-pass tracker confirmation rates (`confirmed / total`) and **95% Wilson confidence intervals** directly from the 14-day tracker dataset, surfaced in `TimelineControls.jsx`.
 
 ---
 
-## 5. Bow-Tie Effect Mitigation
+## 5. Workflow Isolation: 14-Day Ingestion, Three Tracker Tabs & Python ML
 
-Both MODIS and VIIRS use cross-track scanning mirrors that suffer from panoramic distortion toward the swath edges ($\pm 55^\circ$):
-- **MODIS**: Has no onboard bow-tie correction. At swath edges, pixel area expands up to **$10\times$** ($\approx 10\text{ km}^2$), causing consecutive scan lines to physically overlap by up to 50% and generating duplicate detections for the same fire.
-- **VIIRS**: Solves this via onboard $3:1 \to 2:1 \to 1:1$ pixel aggregation and hardware deletion of overlapping edge samples, constraining pixel area expansion to only $\sim 2\times$.
-- **Harmonization Mitigation**: When MODIS and VIIRS overlap, our engine anchors to VIIRS's geometrically stable coordinate and filters out swath-edge duplicate detections via geodesic clustering.
+Implemented across [`lib/firms.js`](file:///Users/tariqmahmood/Projects/modis-viirs/lib/firms.js), [`lib/hotspots.js`](file:///Users/tariqmahmood/Projects/modis-viirs/lib/hotspots.js), and [`lib/fire-models.js`](file:///Users/tariqmahmood/Projects/modis-viirs/lib/fire-models.js):
+
+- **Timestamp & Dataset Window Anchoring**:
+  - `fetchDetections14Days` and `itemAcquiredMs` in [`lib/firms.js`](file:///Users/tariqmahmood/Projects/modis-viirs/lib/firms.js) extract UTC timestamps cleanly across `item.acquired`, `item.trackerHotspot._acquired`, and `item.row[4]` so historical and NRT CSV chunks preserve true acquisition times.
+  - `getCountryHotspots` in [`lib/hotspots.js`](file:///Users/tariqmahmood/Projects/modis-viirs/lib/hotspots.js) anchors `referenceEndMs` to the maximum detection timestamp in `insideItems` (`cutoffRecentMs = referenceEndMs - 12h`), preventing wall-clock drift from emptying recent windows.
+- **Full 14-Day Point Preservation & Event Linkage (`buildCombinedHarmonizedPoints`)**:
+  - Harmonizes all 14 days of `insideItems`, preserves Tier 4 detections (`<30%` MODIS / VIIRS `l`) so interactive confidence scrubbing can show or hide them on demand, and links each point to its tracked `fire_final` ID via key, coordinate, or nearest-detection matching.
+  - Outputs a **13-element point tuple**:
+    `[lon, lat, frp, sensor, countWeight, acquired, extinguished, evidence, finalTier, confidence, satellite, matches, fireId]`
+  - Emits both `points` (`<=12h`, up to `INSIDE_LIMIT = 4000`) and `points14d` (up to `POINTS_14D_LIMIT = 12000`), merged via `mergePointWindows` so `<=12h` points are prioritized and never thinned out.
+- **Three Tracker Tabs & Recent vs. Past Split (`filterRecent12Hours`)**:
+  - Every country fetch runs `trackFiresWithBackend(..., "deployment")` across all 14 days independently for `combined`, `viirs`, and `modis`, splitting outputs into `recentFireEvents` (`<=12h`, `is_past: false`) and `pastFireEvents` (`>12h`, `is_past: true`).
+  - **`combined` (`MODIS + VIIRS`)**: Layer B geospatially harmonized detections + Layer A `harmonization` baseline + VIIRS-backed ML predictions and `0–100` hazard ratings matched onto VIIRS-evidenced combined events (`attachViirsModelsToCombined`).
+  - **`viirs` (`VIIRS · ML`)**: VIIRS-only 14-day tracks with Python ML spread polygons (`predictionsGeoJson`), past-fire hindcast predictions (`pastPredictionsGeoJson`), and `0–100` hazard attribution, annotated with Layer A regional `context`.
+  - **`modis` (`MODIS`)**: Pure MODIS tracker view (`prediction: null`, `hazard: null`) adhering to [`models_explained.md`](file:///Users/tariqmahmood/Projects/modis-viirs/models_explained.md) so VIIRS-trained ML weights are never extrapolated onto MODIS-only tracks.
 
 ---
 
-## 6. Frontend Controls & User Workflow
+## 6. Interactive Harmonization Filter, 24-Hour Scrubber & 14-Day Calendar
 
-1. **Confidence Filter Slider**:
-   - `ALL`: Displays all sensors (MODIS solo, VIIRS solo, Dual-confirmed).
-   - `VIIRS + DUAL (DEFAULT)`: The high-accuracy operational view, filtering out coarse unverified MODIS noise.
-   - `DUAL ONLY`: Isolates ultra-high confidence (95–100%) coincident multi-satellite confirmations.
-2. **24-Hour Historical Scrub**:
-   - Scrub $0$ to $24$ hours back.
-   - Historical fires fade to lighter muted salmon (`#dfb7a2`), clearly distinguishing currently active burning fronts from extinguished/past fires.
-3. **Date & Time Range Query**:
-   - Query multi-day historical FIRMS data with minute-precision UTC start and end bounds.
-4. **Global Country / Location Selector**:
-   - Search and switch to any country across the globe with smooth 3D camera transitions and live FIRMS data loading.
+Implemented in [`lib/hotspot-data.js`](file:///Users/tariqmahmood/Projects/modis-viirs/lib/hotspot-data.js), [`TimelineControls.jsx`](file:///Users/tariqmahmood/Projects/modis-viirs/app/components/globe/TimelineControls.jsx), [`Hero.jsx`](file:///Users/tariqmahmood/Projects/modis-viirs/app/components/Hero.jsx), and [`CountrySidebar.jsx`](file:///Users/tariqmahmood/Projects/modis-viirs/app/components/globe/CountrySidebar.jsx):
+
+- **5-Step Harmonization Filter (`pointMatchesTierFilter`)** — active across all three tabs (`combined`, `viirs`, `modis`):
+  - `0` (`all`): All detections across Tiers 1–4.
+  - `1` (`moderate_plus`): Cross-sensor consistent subset (`MODIS >= 30%` & `VIIRS nominal/high`, excluding Tier 4).
+  - `2` (`viirs_and_dual`): Non-low VIIRS 375 m detections, Tier 1 dual-confirmed detections, and `MODIS >= 65%` detections (`MODIS ≥65%` in the MODIS tab).
+  - `3` (`high_and_dual`): High-confidence detections only (`VIIRS H`, `MODIS >= 80%`, and Tier 1 dual-confirmed).
+  - `4` (`dual_only`): Tier 1 Dual-confirmed (`MODIS + VIIRS` within `1 km` & adaptive `±4–5.5 h` window).
+- **24-Hour Scrubber & Orbital Pass Slicing (`classifyHotspots`)**:
+  - Scrubs `hoursBack` across `0–24h` behind `referenceTime`, using a `6h` orbital pass slice (widening automatically to `12h` if a `6h` orbital gap yields zero detections) and counting distinct linked fire events alongside point totals.
+- **Date & Time Calendar + Interactive 14-Day Cividis Cells**:
+  - Anchors default form inputs and quick presets (`6h`, `12h`, `24h`, `7d`, `14d`) to `referenceTime`.
+  - Filters `points14d` locally whenever the requested UTC interval overlaps the already-loaded 14-day window, only querying `/api/hotspots` remotely when the user jumps outside the loaded window.
+  - Clicking any day square in the **14-day Cividis heatmap** toggles `selectedDay`, focusing both timeline controls and visible fires onto that UTC day.
+- **Synchronized Map & Sidebar State**:
+  - `Hero.jsx` filters tracked fires (`eventMatchesFilter`) in lockstep with `filterWindow`, `fireListScope`, and `selectedDay`, updating `HOTSPOT_SOURCE`, `TRACKED_FIRES_SOURCE`, `PREDICTION_SOURCE`, `sortedEvents`, and `CountrySidebar.jsx` live telemetry counts simultaneously.
+
+---
+
+## 7. Past Fire Hindcast: Actual Spread vs. Model Predicted Spread
+
+Implemented across [`lib/fire-models.js`](file:///Users/tariqmahmood/Projects/modis-viirs/lib/fire-models.js), [`app/api/fire-models/route.js`](file:///Users/tariqmahmood/Projects/modis-viirs/app/api/fire-models/route.js), [`layers.js`](file:///Users/tariqmahmood/Projects/modis-viirs/app/components/globe/layers.js), [`FireInspectorPanel.jsx`](file:///Users/tariqmahmood/Projects/modis-viirs/app/components/globe/FireInspectorPanel.jsx), and [`OnMapFireHud.jsx`](file:///Users/tariqmahmood/Projects/modis-viirs/app/components/globe/OnMapFireHud.jsx):
+
+1. **Initial-Pass (`t0`) Snapshot Reconstruction (`buildHindcastSnapshot`)**:
+   - Rewinds each multi-pass or past fire to its earliest orbital pass (`t0`), synthesizing an `earlyFireEvent` (`initialAreaKm2`, initial FRP/detection counts) paired with the fire's observed final outcome (`actualFinalAreaKm2`, `actualAddAreaKm2`, `persisted`, `expandedActual`).
+2. **Batch & On-Demand Hindcast Scoring**:
+   - `buildViirsModelBundle` pre-scores up to 25 top past fires from their `t0` `earlyFireEvent` (`pastPredictionsGeoJson`, plus hazard attribution for multi-pass fires) and links them onto `combined` past fires in `attachViirsModelsToCombined`.
+   - Selecting any unscored past fire triggers `/api/fire-models` with `use_hindcast_snapshot: true`, running `/predict_event` against `fireEvent.hindcast.earlyFireEvent`.
+3. **On-Map Spread Comparison (`buildSelectedFireSpreadGeoJson` & `buildActualSpreadGeometry`)**:
+   - **`selected_current_footprint`**: Initial Pass (`t0`) footprint (or current footprint for active fires).
+   - **`selected_actual_footprint`**: 36-sector radial geodesic perimeter hugging the fire's observed detections (`selected-fire-actual-fill` in `#10b981`, `selected-fire-actual-line` in `#34d399`).
+   - **`selected_predicted_footprint` & `selected_p90_footprint`**: Model 1–3 predicted spread (`12–24h`) and 90% spread bound evaluated from `t0`, rendered concurrently so users can inspect forecast accuracy directly against the observed perimeter.
+4. **Scope Switching UI**:
+   - `FireInspectorPanel.jsx` and `OnMapFireHud.jsx` provide `RECENT (≤12H)` vs `PAST FIRES (14D)` scope toggles (`.fire-scope-switch` / `.map-scope-switch`) and side-by-side **Actual Spread vs. Model Predicted Spread** comparison readouts.
+
+---
+
+## 8. UI Presentation, Exports & Scientific Transparency
+
+- **`TimelineControls.jsx`**: Displays ordinal tier ranking (`Tier 1 > 2 > 3 > 4`), active tab confidence rules, and live empirical multi-pass confirmation percentages with 95% Wilson CIs on hover.
+- **`FireInspectorPanel.jsx`**:
+  - Renders the **Harmonized 14d Baseline (Layer A)** card with MODIS-equivalent activity + 90% PI, anomaly ratio/percentile vs 14-day median/IQR, the interactive **14-day Cividis heatmap strip** (dashed outlines flag extrapolated/uncertain days; clicking a day filters the map), transfer factor & LOO-CV diagnostics, and **CSV exports** (raw harmonized hotspots and 14-day MODIS-eq daily series stamped with `# Methods Note` metadata headers).
+  - **Selected Fire Inspector** presents the Layer A `14D REGIONAL CONTEXT` pill, tracker pass history, VIIRS ML spread forecasts or `t0` hindcast accuracy comparison, and hazard feature drivers.
+- **`OnMapFireHud.jsx`**: Surfaces active fire hazard rating, spread rings legend (`Initial Pass (t0)` / `Current Spread`, `Actual Spread`, `Predicted Spread` / `12–24h Spread`, `90% Bound`, `Pass Trail`), and `14d Baseline` regional context directly on the map canvas.

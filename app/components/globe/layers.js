@@ -121,6 +121,79 @@ function geodesicCirclePolygon(lon, lat, radiusKm, steps = 48) {
   };
 }
 
+/**
+ * Builds a star-shaped geodesic perimeter around actual fire detections so
+ * directional spread can be visually compared against isotropic model predictions.
+ */
+function buildActualSpreadGeometry(detections = [], centerLon, centerLat, actualAreaKm2) {
+  const pts = detections
+    .map((d) => ({
+      lon: Number(d.lon ?? d.longitude),
+      lat: Number(d.lat ?? d.latitude),
+    }))
+    .filter((p) => Number.isFinite(p.lon) && Number.isFinite(p.lat));
+
+  const minRadiusKm = Math.max(0.28, areaToRadiusKm(actualAreaKm2));
+  if (pts.length <= 1) {
+    return geodesicCirclePolygon(centerLon, centerLat, minRadiusKm);
+  }
+
+  const cLon = pts.reduce((s, p) => s + p.lon, 0) / pts.length;
+  const cLat = pts.reduce((s, p) => s + p.lat, 0) / pts.length;
+  const cosLat = Math.max(0.2, Math.cos((cLat * Math.PI) / 180));
+
+  const offsets = pts.map((p) => ({
+    dx: (p.lon - cLon) * 111.32 * cosLat,
+    dy: (p.lat - cLat) * 111.32,
+  }));
+
+  const maxSpread = Math.max(0, ...offsets.map((o) => Math.hypot(o.dx, o.dy)));
+  if (maxSpread < 0.08) {
+    return geodesicCirclePolygon(cLon, cLat, minRadiusKm);
+  }
+
+  const steps = 36;
+  const pixelPadKm = 0.26;
+  let radii = [];
+
+  for (let i = 0; i < steps; i++) {
+    const theta = (i / steps) * Math.PI * 2;
+    const ux = Math.sin(theta);
+    const uy = Math.cos(theta);
+    let maxProj = 0;
+    for (const o of offsets) {
+      const dist = Math.hypot(o.dx, o.dy);
+      if (dist < 1e-6) continue;
+      const cosAng = (o.dx * ux + o.dy * uy) / dist;
+      if (cosAng > 0) {
+        const proj = dist * Math.pow(cosAng, 1.5);
+        if (proj > maxProj) maxProj = proj;
+      }
+    }
+    radii.push(Math.max(minRadiusKm * 0.72, maxProj + pixelPadKm));
+  }
+
+  for (let pass = 0; pass < 2; pass++) {
+    radii = radii.map((_, idx) => {
+      const prev = radii[(idx - 1 + steps) % steps];
+      const curr = radii[idx];
+      const next = radii[(idx + 1) % steps];
+      return 0.25 * prev + 0.5 * curr + 0.25 * next;
+    });
+  }
+
+  const coords = radii.map((rKm, i) => {
+    const bearing = (i / steps) * Math.PI * 2;
+    return geodesicDestination(cLon, cLat, rKm, bearing);
+  });
+  coords.push(coords[0]);
+
+  return {
+    type: "Polygon",
+    coordinates: [coords],
+  };
+}
+
 function detectionTimestampMs(det) {
   if (!det) return NaN;
   if (typeof det._acquired === "number" && Number.isFinite(det._acquired)) return det._acquired;
@@ -149,12 +222,30 @@ export function buildSelectedFireSpreadGeoJson(
 
   const hazard = selectedFireEvent?.hazard || null;
   const prediction = selectedFireEvent?.prediction || null;
+  const hindcast = selectedFireEvent?.hindcast || null;
   const detections = Array.isArray(selectedFireEvent?.detections) ? selectedFireEvent.detections : [];
+  const isPastFire = Boolean(selectedFireEvent?.is_past);
+  const showActualVsPredicted =
+    isPastFire || (Boolean(hindcast?.isMultiPass) && hindcast.actualFinalAreaKm2 > hindcast.initialAreaKm2);
 
-  const centerLon = Number(prediction?.center_lon ?? fire.lon);
-  const centerLat = Number(prediction?.center_lat ?? fire.lat);
-  const currentArea = Math.max(Number(prediction?.current_area_km2 ?? fire.area_km2) || 0.18, 0.14);
-  const currentRadiusKm = areaToRadiusKm(currentArea);
+  const earlyFire = showActualVsPredicted ? hindcast?.earlyFireEvent?.fire : null;
+  const initialLon = Number(earlyFire?.lon ?? prediction?.center_lon ?? fire.lon);
+  const initialLat = Number(earlyFire?.lat ?? prediction?.center_lat ?? fire.lat);
+  const actualLon = Number(fire.lon);
+  const actualLat = Number(fire.lat);
+  const centerLon = showActualVsPredicted ? initialLon : Number(prediction?.center_lon ?? fire.lon);
+  const centerLat = showActualVsPredicted ? initialLat : Number(prediction?.center_lat ?? fire.lat);
+
+  const initialArea = Math.max(
+    Number(
+      showActualVsPredicted
+        ? (hindcast?.initialAreaKm2 ?? prediction?.current_area_km2 ?? fire.area_km2)
+        : (prediction?.current_area_km2 ?? fire.area_km2),
+    ) || 0.18,
+    0.14,
+  );
+  const actualArea = Math.max(Number(hindcast?.actualFinalAreaKm2 ?? fire.area_km2) || initialArea, 0.14);
+  const currentRadiusKm = areaToRadiusKm(initialArea);
 
   const backendCurrent = selectedPredictionFeatures.find(
     (f) => f?.properties?.role === "current_footprint" && f?.geometry,
@@ -167,24 +258,41 @@ export function buildSelectedFireSpreadGeoJson(
   );
 
   const m3 = model3EnvelopeByFireType(fire.fire_type);
+  const hasPredictionGeom = Boolean(backendPredicted?.geometry);
   const hasExpansionGeometry =
-    Boolean(backendPredicted?.geometry) &&
-    Number(prediction?.predicted_total_area_km2) > currentArea + 0.05;
+    hasPredictionGeom &&
+    Number(prediction?.predicted_total_area_km2) > initialArea + 0.05;
 
-  const predictedArea = hasExpansionGeometry
-    ? Number(prediction.predicted_total_area_km2)
-    : Number((currentArea + m3.median).toFixed(2));
+  let predictedArea;
+  let predictedGeometry;
+  let isModel3Fallback = false;
+
+  if (showActualVsPredicted && prediction) {
+    predictedArea = Number(prediction.predicted_total_area_km2 ?? initialArea);
+    predictedGeometry = hasPredictionGeom
+      ? backendPredicted.geometry
+      : geodesicCirclePolygon(
+          Number(prediction?.center_lon ?? centerLon),
+          Number(prediction?.center_lat ?? centerLat),
+          areaToRadiusKm(predictedArea),
+        );
+  } else if (hasExpansionGeometry) {
+    predictedArea = Number(prediction.predicted_total_area_km2);
+    predictedGeometry = backendPredicted.geometry;
+  } else {
+    predictedArea = Number((initialArea + m3.median).toFixed(2));
+    predictedGeometry = geodesicCirclePolygon(centerLon, centerLat, areaToRadiusKm(predictedArea));
+    isModel3Fallback = true;
+  }
   const predictedRadiusKm = areaToRadiusKm(predictedArea);
 
   const outerArea = backendOuter?.properties?.area_km2
     ? Number(backendOuter.properties.area_km2)
-    : Number((currentArea + (prediction?.additional_area_p90_km2 ?? m3.p90)).toFixed(2));
+    : Number((initialArea + (prediction?.additional_area_p90_km2 ?? m3.p90)).toFixed(2));
   const outerRadiusKm = areaToRadiusKm(outerArea);
 
-  const currentGeometry = backendCurrent?.geometry || geodesicCirclePolygon(centerLon, centerLat, currentRadiusKm);
-  const predictedGeometry = hasExpansionGeometry
-    ? backendPredicted.geometry
-    : geodesicCirclePolygon(centerLon, centerLat, predictedRadiusKm);
+  const currentGeometry =
+    backendCurrent?.geometry || geodesicCirclePolygon(centerLon, centerLat, currentRadiusKm);
   const outerGeometry =
     backendOuter?.geometry || geodesicCirclePolygon(centerLon, centerLat, outerRadiusKm);
 
@@ -193,15 +301,17 @@ export function buildSelectedFireSpreadGeoJson(
       ? `Persist ${Math.round(prediction.persistence_probability * 100)}%`
       : null;
 
-  const predictedLabelText = hasExpansionGeometry
-    ? `12–24H PREDICTED · ${predictedArea.toFixed(2)} km² (${
-        prediction?.prediction_status === "expansion_likely"
-          ? "EXPANDING"
-          : persistStr || "ACTIVE"
+  const predictedLabelText = showActualVsPredicted && prediction
+    ? `MODEL PREDICTED · ${predictedArea.toFixed(2)} km² (${
+        prediction.prediction_status === "expansion_likely" ? "EXPAND" : persistStr || "STABLE"
       })`
-    : `12–24H MODEL-3 ENVELOPE · ${predictedArea.toFixed(2)} km²${
-        persistStr ? ` (${persistStr})` : ""
-      }`;
+    : !isModel3Fallback
+      ? `12–24H PREDICTED · ${predictedArea.toFixed(2)} km² (${
+          prediction?.prediction_status === "expansion_likely"
+            ? "EXPANDING"
+            : persistStr || "ACTIVE"
+        })`
+      : `12–24H MODEL-3 ENVELOPE · ${predictedArea.toFixed(2)} km²${persistStr ? ` (${persistStr})` : ""}`;
 
   const centerBadgeText = hazard?.hazard_rating
     ? `FIRE #${fire.fire_final} · ${String(hazard.hazard_rating).toUpperCase()} (${hazard.hazard_score}/100)`
@@ -225,19 +335,32 @@ export function buildSelectedFireSpreadGeoJson(
         fire_final: fire.fire_final,
         area_km2: predictedArea,
         prediction_status: prediction?.prediction_status ?? null,
-        is_model3_envelope: !hasExpansionGeometry,
-      },
-    },
-    {
-      type: "Feature",
-      geometry: currentGeometry,
-      properties: {
-        role: "selected_current_footprint",
-        fire_final: fire.fire_final,
-        area_km2: currentArea,
+        is_model3_envelope: isModel3Fallback,
       },
     },
   ];
+
+  if (showActualVsPredicted) {
+    features.push({
+      type: "Feature",
+      geometry: buildActualSpreadGeometry(detections, actualLon, actualLat, actualArea),
+      properties: {
+        role: "selected_actual_footprint",
+        fire_final: fire.fire_final,
+        area_km2: actualArea,
+      },
+    });
+  }
+
+  features.push({
+    type: "Feature",
+    geometry: currentGeometry,
+    properties: {
+      role: "selected_current_footprint",
+      fire_final: fire.fire_final,
+      area_km2: initialArea,
+    },
+  });
 
   // Build chronological detection trajectory across 12h/6h passes
   const passBuckets = new Map();
@@ -307,7 +430,7 @@ export function buildSelectedFireSpreadGeoJson(
   features.push(
     {
       type: "Feature",
-      geometry: { type: "Point", coordinates: [centerLon, centerLat] },
+      geometry: { type: "Point", coordinates: [actualLon, actualLat] },
       properties: {
         role: "selected_ring_label",
         label_kind: "center_badge",
@@ -324,7 +447,9 @@ export function buildSelectedFireSpreadGeoJson(
       properties: {
         role: "selected_ring_label",
         label_kind: "current_label",
-        label_text: `CURRENT SPREAD · ${currentArea.toFixed(2)} km² (${fire.n_det ?? detections.length} det)`,
+        label_text: showActualVsPredicted
+          ? `INITIAL PASS (T0) · ${initialArea.toFixed(2)} km²`
+          : `CURRENT SPREAD · ${initialArea.toFixed(2)} km² (${fire.n_det ?? detections.length} det)`,
         hazard_rating: hazard?.hazard_rating ?? null,
       },
     },
@@ -355,6 +480,27 @@ export function buildSelectedFireSpreadGeoJson(
       },
     },
   );
+
+  if (showActualVsPredicted) {
+    features.push({
+      type: "Feature",
+      geometry: {
+        type: "Point",
+        coordinates: geodesicDestination(
+          actualLon,
+          actualLat,
+          Math.max(areaToRadiusKm(actualArea), 0.32),
+          (135 * Math.PI) / 180,
+        ),
+      },
+      properties: {
+        role: "selected_ring_label",
+        label_kind: "actual_label",
+        label_text: `ACTUAL SPREAD · ${actualArea.toFixed(2)} km² (${fire.n_det ?? detections.length} det · ${fire.n_passes ?? 1}p)`,
+        hazard_rating: hazard?.hazard_rating ?? null,
+      },
+    });
+  }
 
   return { type: "FeatureCollection", features };
 }
@@ -485,11 +631,11 @@ export function setTrackerOverlay(
       "tracked-fires-hazard-label",
       selectedKey
         ? [
-            "all",
-            ["!=", ["get", "hazard_score"], null],
-            [">=", ["get", "hazard_score"], 0],
-            ["!=", ["to-string", ["get", "fire_final"]], selectedKey],
-          ]
+          "all",
+          ["!=", ["get", "hazard_score"], null],
+          [">=", ["get", "hazard_score"], 0],
+          ["!=", ["to-string", ["get", "fire_final"]], selectedKey],
+        ]
         : ["all", ["!=", ["get", "hazard_score"], null], [">=", ["get", "hazard_score"], 0]],
     );
   }
@@ -670,6 +816,27 @@ export function addHotspotLayers(map) {
       "line-width": 2.4,
       "line-dasharray": [4, 2],
       "line-opacity": 0.95,
+    },
+  });
+  map.addLayer({
+    id: "selected-fire-actual-fill",
+    type: "fill",
+    source: SELECTED_FIRE_SOURCE,
+    filter: ["==", ["get", "role"], "selected_actual_footprint"],
+    paint: {
+      "fill-color": "#10b981",
+      "fill-opacity": 0.25,
+    },
+  });
+  map.addLayer({
+    id: "selected-fire-actual-line",
+    type: "line",
+    source: SELECTED_FIRE_SOURCE,
+    filter: ["==", ["get", "role"], "selected_actual_footprint"],
+    paint: {
+      "line-color": "#34d399",
+      "line-width": 2.8,
+      "line-opacity": 0.98,
     },
   });
   map.addLayer({
@@ -872,6 +1039,8 @@ export function addHotspotLayers(map) {
       "text-color": [
         "match",
         ["get", "label_kind"],
+        "actual_label",
+        "#6ee7b7",
         "current_label",
         "#ffd5b8",
         "predicted_label",
