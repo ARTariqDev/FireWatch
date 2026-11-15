@@ -9,8 +9,9 @@ import { prefersReducedMotion } from "./geo";
 import HotspotRefresh from "./HotspotRefresh";
 import ViewModeSwitch from "./ViewModeSwitch";
 import TimelineControls from "./TimelineControls";
-import CountryPicker from "./CountryPicker";
+import CountrySelector from "./CountrySelector";
 import FireInspectorPanel from "./FireInspectorPanel";
+import countryFlag from "./countryFlag";
 
 gsap.registerPlugin(useGSAP);
 
@@ -244,18 +245,25 @@ function CountrySidebar({
             onError={onRefreshError}
             onRefreshStart={onRefreshStart}
           />
-          <CountryPicker
-            currentIso3={country?.iso3}
-            onSelectCountry={onSelectCountry}
-            disabled={!canExit || switching}
-          />
         </div>
         <div aria-live="polite">
+          <CountrySelector
+            selectedIso3={country?.iso3}
+            onSelect={onSelectCountry}
+            disabled={!canExit || switching}
+          />
           <p className="hud-eyebrow">
             <i aria-hidden="true" />
             {country?.located ? "YOUR REGION · FROM DEVICE LOCATION" : "DEFAULT REGION · LOCATION UNAVAILABLE"}
           </p>
-          <h2 className="hud-title">{country?.name ?? "—"}</h2>
+          <h2 className="hud-title">
+            {country?.data?.country?.iso2 && (
+              <span className="hud-title-flag" aria-hidden="true">
+                {countryFlag(country.data.country.iso2)}
+              </span>
+            )}
+            {country?.name ?? "—"}
+          </h2>
           <p className="hud-sub">{tabSubtitle}</p>
 
           {ready && (
