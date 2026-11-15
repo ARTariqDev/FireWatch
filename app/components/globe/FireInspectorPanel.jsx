@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
+import FireActivityCalendar from "./FireActivityCalendar";
 
 const RATING_CLASS = {
   Low: "hazard-low",
@@ -41,45 +42,13 @@ function formatPredictionStatus(status) {
   return status ? String(status).toUpperCase() : "UNAVAILABLE";
 }
 
-const CIVIDIS_STOPS = [
-  "#131f3b",
-  "#233e6c",
-  "#4c566d",
-  "#7a7b78",
-  "#af9e56",
-  "#fee838",
-];
-
-function cividisColor(value, maxVal) {
-  if (!maxVal || value <= 0) return "#181512";
-  const ratio = Math.min(1, Math.max(0, value / maxVal));
-  const idx = Math.min(
-    CIVIDIS_STOPS.length - 1,
-    Math.max(0, Math.round(ratio * (CIVIDIS_STOPS.length - 1))),
-  );
-  return CIVIDIS_STOPS[idx];
-}
-
-function csvCell(value) {
-  if (value === null || value === undefined) return "";
-  const str = String(value);
-  if (/[",\n\r]/.test(str)) {
-    return `"${str.replace(/"/g, '""')}"`;
-  }
-  return str;
-}
-
-function triggerCsvDownload(filename, content) {
-  if (typeof window === "undefined") return;
-  const blob = new Blob([content], { type: "text/csv;charset=utf-8;" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.setAttribute("download", filename);
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  URL.revokeObjectURL(url);
+function formatSsotRegime(regime) {
+  if (regime === "coincident_dual") return "Coincident Dual (MODIS+VIIRS)";
+  if (regime === "diurnal_bridged") return "Diurnal Bridged (t0+Δt)";
+  if (regime === "sub_resolution_viirs") return "VIIRS 375m Sub-Resolution";
+  if (regime === "modis_gap_fill") return "MODIS 1km Gap-Fill";
+  if (regime === "demoted_modis_anomaly") return "Demoted MODIS Anomaly";
+  return regime ? String(regime).replaceAll("_", " ").toUpperCase() : "SSOT";
 }
 
 export default function FireInspectorPanel({
@@ -87,6 +56,7 @@ export default function FireInspectorPanel({
   activeTab,
   tabData,
   harmonization = null,
+  points14d = [],
   rawPoints = [],
   sortedEvents: passedSortedEvents,
   fireListScope = "recent",
@@ -166,82 +136,9 @@ export default function FireInspectorPanel({
   );
   const harmSummary = harmonization?.summary || null;
   const harmValidation = harmonization?.validation || null;
-  const harmDaily = useMemo(() => harmonization?.dailySeries || [], [harmonization?.dailySeries]);
-  const maxDailyModisEq = useMemo(
-    () => Math.max(0, ...harmDaily.map((d) => Number(d.modisEquivalent) || 0)),
-    [harmDaily],
-  );
+  const harmSsot = harmonization?.ssot || null;
+  const harmContext = harmonization?.context || null;
   const eventContext = activeFireEvent?.context || harmonization?.context || null;
-
-  const handleExportHotspotsCsv = () => {
-    const headerNote = [
-      `# Methods Note: Layer B Event Fusion (1.0 km geodesic, +/-4-5.5h drift-adaptive coincidence gate)`,
-      `# Region: ${iso3 || "UNKNOWN"} | Tab: ${activeTab} | Generated: ${generatedAt || new Date().toISOString()}`,
-      `# Filters: MODIS >= 30%, VIIRS nominal+high | Window: <=12h display from 14d tracker`,
-      harmSummary
-        ? `# Baseline: Median ${harmSummary.median14d} MODIS-eq cell-days (14d) | Unit: ${harmSummary.unit}`
-        : `# Baseline: N/A`,
-    ];
-    const columns = "longitude,latitude,frp_mw,sensor,satellite,confidence,acq_datetime_utc,tier,fire_final";
-    const rows = (rawPoints || []).map((pt) => {
-      const tierLabel =
-        pt[6] === 1
-          ? "Tier 4 (Inactive)"
-          : pt[8] === 1
-            ? "Tier 1 (Dual)"
-            : pt[8] === 2
-              ? "Tier 2 (VIIRS Solo)"
-              : "Tier 3 (MODIS Solo)";
-      const isoTime = Number.isFinite(pt[5]) ? new Date(pt[5]).toISOString() : "";
-      return [
-        csvCell(pt[0]),
-        csvCell(pt[1]),
-        csvCell(pt[2]),
-        csvCell(pt[3] === 0 ? "MODIS" : "VIIRS"),
-        csvCell(pt[10] ?? ""),
-        csvCell(pt[9] ?? ""),
-        csvCell(isoTime),
-        csvCell(tierLabel),
-        csvCell(pt[12] ?? ""),
-      ].join(",");
-    });
-    triggerCsvDownload(
-      `firewatch-${(iso3 || "region").toLowerCase()}-hotspots-${activeTab}.csv`,
-      [...headerNote, columns, ...rows].join("\n"),
-    );
-  };
-
-  const handleExportSeriesCsv = () => {
-    if (!harmDaily.length) return;
-    const headerNote = [
-      `# Methods Note: Layer A Statistical Harmonization (1 km ~0.009 deg hotspot-cell-day binning)`,
-      `# Region: ${iso3 || "UNKNOWN"} | Reference Unit: ${harmSummary?.unit || "MODIS-equivalent cell-days"}`,
-      `# Consistency Filter: MODIS >= 30%, VIIRS nominal+high | Afternoon ~13:30 share: ${Math.round((harmSummary?.filterStats?.afternoonShare ?? 0) * 100)}%`,
-      `# Validation (LOO-CV): Method=${harmValidation?.method || "N/A"}, MAE=${harmValidation?.mae ?? "N/A"}, RMSE=${harmValidation?.rmse ?? "N/A"}, Bias=${harmValidation?.bias ?? "N/A"}, Quality=${harmValidation?.qualityFlag || "N/A"}`,
-      `# Baseline (14d): Median=${harmSummary?.median14d ?? 0}, IQR=${harmSummary?.iqr14d ?? 0}`,
-    ];
-    const columns =
-      "date_utc,observed_modis_cell_days,raw_viirs_cell_days,calibrated_viirs,modis_equivalent,pi90_lower,pi90_upper,source,frp_sum_mw,afternoon_share,drift_detected";
-    const rows = harmDaily.map((d) =>
-      [
-        csvCell(d.date),
-        csvCell(d.modisCellDays),
-        csvCell(d.viirsCellDays),
-        csvCell(d.calibratedViirs),
-        csvCell(d.modisEquivalent),
-        csvCell(d.interval?.[0] ?? 0),
-        csvCell(d.interval?.[1] ?? 0),
-        csvCell(d.source),
-        csvCell(d.totalFrpSum ?? 0),
-        csvCell(d.afternoonShare ?? ""),
-        csvCell(d.driftDetected ? "true" : "false"),
-      ].join(","),
-    );
-    triggerCsvDownload(
-      `firewatch-${(iso3 || "region").toLowerCase()}-harmonized-14d.csv`,
-      [...headerNote, columns, ...rows].join("\n"),
-    );
-  };
 
   return (
     <div className="tracker-models-panel">
@@ -323,9 +220,9 @@ export default function FireInspectorPanel({
       )}
 
       {(activeTab === "combined" || activeTab === "viirs") && harmSummary && (
-        <div className="harm-baseline-section" aria-label="Statistical Harmonization and 14-Day Baseline">
+        <div className="harm-baseline-section" aria-label="Single Source of Truth Harmonization and Activity Calendar">
           <div className="model-section-header">
-            <span className="model-section-title">HARMONIZED 14D BASELINE (LAYER A)</span>
+            <span className="model-section-title">SSOT HARMONIZATION &amp; CALENDAR (PIPE A)</span>
             <span className="model-version-tag">
               MODIS-EQ · {String(harmValidation?.qualityFlag || "low").toUpperCase()}
             </span>
@@ -340,7 +237,12 @@ export default function FireInspectorPanel({
                   [{num(harmSummary.latestInterval?.[0], 1)}–{num(harmSummary.latestInterval?.[1], 1)}]
                 </small>
               </strong>
-              <em>1 km cell-days · 90% PI</em>
+              <em>
+                1 km cell-days · 90% PI
+                {harmContext?.historicalMonthMedian != null
+                  ? ` · Hist med ${num(harmContext.historicalMonthMedian, 1)}`
+                  : ""}
+              </em>
             </div>
             <div className="harm-kpi">
               <span>VS 14D MEDIAN ({num(harmSummary.median14d, 1)})</span>
@@ -359,47 +261,42 @@ export default function FireInspectorPanel({
             </div>
           </div>
 
-          {harmDaily.length > 0 && (
-            <div className="harm-strip-wrap">
-              <div className="harm-strip-head">
-                <span>14-DAY ACTIVITY CALENDAR (CLICK DAY TO FILTER)</span>
-                {selectedDay ? (
-                  <button
-                    type="button"
-                    className="harm-day-clear-btn"
-                    onClick={() => onSelectDay?.(null)}
-                  >
-                    {selectedDay.slice(5)} ×
-                  </button>
-                ) : (
-                  <span>
-                    {harmDaily[0]?.date?.slice(5)} → {harmDaily[harmDaily.length - 1]?.date?.slice(5)}
-                  </span>
-                )}
-              </div>
-              <div className="harm-strip" role="group" aria-label="14-day MODIS-equivalent activity calendar">
-                {harmDaily.map((day) => {
-                  const isUncertain =
-                    day.source === "calibrated_viirs" || harmValidation?.qualityFlag === "low_sparse";
-                  const isDaySelected = selectedDay === day.date;
-                  return (
-                    <button
-                      key={day.date}
-                      type="button"
-                      className={`harm-cell ${isUncertain ? "is-uncertain" : ""} ${isDaySelected ? "is-day-selected" : ""}`}
-                      style={{ backgroundColor: cividisColor(day.modisEquivalent, maxDailyModisEq) }}
-                      onClick={() => onSelectDay?.(day.date)}
-                      aria-pressed={isDaySelected}
-                      title={`${day.date} (click to filter) · MODIS-eq ${day.modisEquivalent} [90% PI ${day.interval?.[0]}–${day.interval?.[1]}] | Obs MODIS ${day.modisCellDays} | Raw VIIRS ${day.viirsCellDays} (${day.source})`}
-                    />
-                  );
-                })}
-              </div>
-              <div className="harm-strip-foot">
-                <span>Low (0)</span>
-                <span className="cividis-bar" aria-hidden="true" />
-                <span>Peak ({num(maxDailyModisEq, 1)})</span>
-              </div>
+          {harmSsot && (
+            <div className="ssot-regime-strip" aria-label="3-Regime SSOT Optical and Temporal Reconciliation">
+              <span
+                className="ssot-regime-chip is-dual"
+                title={`Coincident overlap <= ${harmSsot.coincidentWindowMin ?? 90}m`}
+              >
+                Dual {harmSsot.coincidentDual ?? 0}
+              </span>
+              <span
+                className="ssot-regime-chip is-bridged"
+                title={`Diurnal bridged t0+Δt <= ${harmSsot.bridgedWindowHours ?? 5.5}h`}
+              >
+                Bridged t₀ {harmSsot.diurnalBridged ?? 0}
+              </span>
+              <span className="ssot-regime-chip is-viirs" title="VIIRS 375m solo sub-resolution detections">
+                VIIRS 375m {harmSsot.subResolutionViirs ?? 0}
+              </span>
+              <span className="ssot-regime-chip is-modis" title="MODIS 1km gap-fill detections">
+                MODIS Gap {harmSsot.modisGapFill ?? 0}
+              </span>
+              {(harmSsot.demotedAnomalies ?? 0) > 0 && (
+                <span
+                  className="ssot-regime-chip is-demoted"
+                  title="MODIS solo uncorroborated during recent VIIRS overpass"
+                >
+                  Demoted {harmSsot.demotedAnomalies}
+                </span>
+              )}
+              {harmSsot.meanFrpRatio !== null && harmSsot.meanFrpRatio !== undefined && (
+                <span
+                  className="ssot-regime-chip is-ratio"
+                  title="Non-additive dual FRP ratio (MODIS / sum VIIRS)"
+                >
+                  FRP_M/ΣV {num(harmSsot.meanFrpRatio, 2)}×
+                </span>
+              )}
             </div>
           )}
 
@@ -416,24 +313,16 @@ export default function FireInspectorPanel({
             </span>
           </div>
 
-          <div className="harm-export-row">
-            <button
-              type="button"
-              className="harm-export-btn"
-              onClick={handleExportHotspotsCsv}
-              disabled={!rawPoints?.length}
-            >
-              ↓ Hotspots CSV
-            </button>
-            <button
-              type="button"
-              className="harm-export-btn"
-              onClick={handleExportSeriesCsv}
-              disabled={!harmDaily.length}
-            >
-              ↓ 14d Series CSV
-            </button>
-          </div>
+          <FireActivityCalendar
+            iso3={iso3}
+            activeTab={activeTab}
+            harmonization={harmonization}
+            points14d={points14d}
+            rawPoints={rawPoints}
+            selectedDay={selectedDay}
+            onSelectDay={onSelectDay}
+            generatedAt={generatedAt}
+          />
         </div>
       )}
 
@@ -609,10 +498,31 @@ export default function FireInspectorPanel({
             {f.merges_in > 0 && <span>MERGES: {f.merges_in}</span>}
           </div>
 
+          {activeFireEvent?.ssot && (
+            <div className="inspector-ssot-pill" aria-label="SSOT fire provenance">
+              <span>SSOT: {formatSsotRegime(activeFireEvent.ssot.primaryRegime)}</span>
+              {activeFireEvent.ssot.modisCorroboratedCount > 0 && (
+                <span>MODIS corr: {activeFireEvent.ssot.modisCorroboratedCount}</span>
+              )}
+              {activeFireEvent.ssot.frpRatio !== null &&
+                activeFireEvent.ssot.frpRatio !== undefined && (
+                  <span>FRP_M/ΣV: {num(activeFireEvent.ssot.frpRatio, 2)}×</span>
+                )}
+              {activeFireEvent.ssot.scanMaxKm !== null &&
+                activeFireEvent.ssot.scanMaxKm !== undefined && (
+                  <span>GIFOV≤{num(activeFireEvent.ssot.scanMaxKm, 2)} km</span>
+                )}
+            </div>
+          )}
+
           {activeFireEvent?.is_past && activeFireEvent?.hindcast && (
             <div className="hindcast-compare-box" aria-label="Actual versus model predicted spread">
               <div className="inspector-subhead">
-                <span className="inspector-sublabel">ACTUAL VS. PREDICTED SPREAD (HINDCAST)</span>
+                <span className="inspector-sublabel">
+                  {hasViirsSupport
+                    ? "ACTUAL VS. PREDICTED SPREAD (HINDCAST)"
+                    : "OBSERVED MULTI-PASS SPREAD (MODIS)"}
+                </span>
                 <span className="hindcast-badge">
                   {activeFireEvent.hindcast.persisted
                     ? `PERSISTED (${activeFireEvent.hindcast.totalPasses} PASSES)`
@@ -633,9 +543,11 @@ export default function FireInspectorPanel({
                   <strong>
                     {resolvedPrediction
                       ? `${num(resolvedPrediction.predicted_total_area_km2, 2)} km²`
-                      : isLoadingHazard
-                        ? "Scoring..."
-                        : "—"}
+                      : !hasViirsSupport
+                        ? "VIIRS Only"
+                        : isLoadingHazard
+                          ? "Scoring..."
+                          : "—"}
                   </strong>
                 </div>
                 <div className="inspector-kv">

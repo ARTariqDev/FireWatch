@@ -86,16 +86,21 @@ export default function TimelineControls({
   if (selectedDay !== prevSelectedDay) {
     setPrevSelectedDay(selectedDay);
     if (selectedDay) {
-      const startMs = Date.parse(`${selectedDay}T00:00:00Z`);
-      const endMs = Date.parse(`${selectedDay}T23:59:59Z`);
-      setMode("interval");
-      setIntervalForm({
-        startDate: selectedDay,
-        startTime: "00:00",
-        endDate: selectedDay,
-        endTime: "23:59",
-      });
-      setActiveInterval({ startMs, endMs });
+      const [startDay, endDay] = selectedDay.includes("..")
+        ? selectedDay.split("..")
+        : [selectedDay, selectedDay];
+      const startMs = Date.parse(`${startDay}T00:00:00Z`);
+      const endMs = Date.parse(`${endDay || startDay}T23:59:59Z`);
+      if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs >= startMs) {
+        setMode("interval");
+        setIntervalForm({
+          startDate: startDay,
+          startTime: "00:00",
+          endDate: endDay || startDay,
+          endTime: "23:59",
+        });
+        setActiveInterval({ startMs, endMs });
+      }
     } else if (prevSelectedDay) {
       setActiveInterval(null);
       setHoursBack(0);
@@ -195,10 +200,9 @@ export default function TimelineControls({
     const interval = { startMs, endMs };
     setMode("interval");
     setActiveInterval(interval);
-    if (startDate !== endDate) {
-      onSelectDay?.(null);
-    } else if (startDate !== selectedDay) {
-      onSelectDay?.(startDate);
+    const nextRange = startDate === endDate ? startDate : `${startDate}..${endDate}`;
+    if (nextRange !== selectedDay) {
+      onSelectDay?.(nextRange);
     }
 
     const inLoadedWindow =

@@ -229,7 +229,7 @@ function CountrySidebar({
       ? "VIIRS 375m · 14d tracked · ≤12h fires · Hazard & ML"
       : activeTab === "modis"
         ? "MODIS 1km · 14d tracked · ≤12h fires"
-        : "MODIS + VIIRS combined · 14d tracked · ≤12h fires";
+        : "MODIS + VIIRS SSOT · 375m lock · 14d tracked · ≤12h fires";
 
   return (
     <aside
@@ -286,7 +286,7 @@ function CountrySidebar({
                 onClick={() => handleTabSelect("combined")}
                 disabled={!canExit || switching}
               >
-                <span className="sensor-tab-label">MODIS + VIIRS</span>
+                <span className="sensor-tab-label">SSOT · HARMONIZED</span>
                 <span className="sensor-tab-count">
                   {tabs?.combined?.fire_events?.length ?? 0} fires
                 </span>
@@ -326,6 +326,7 @@ function CountrySidebar({
               activeTab={activeTab}
               tabData={activeTabData}
               harmonization={harmonization}
+              points14d={activeTabData.points14d || activeTabData.points}
               rawPoints={activeTabData.points}
               sortedEvents={sortedEvents}
               fireListScope={fireListScope}

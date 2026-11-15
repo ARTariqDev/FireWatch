@@ -397,8 +397,24 @@ function Hero() {
         ))),
   );
 
+  const targetModelEvent = useMemo(() => {
+    if (!selectedRawEvent?.fire) return null;
+    if (activeTab === "combined" && selectedRawEvent.viirs_fire_final != null) {
+      const viirsPool = [
+        ...(tabs?.viirs?.fire_events || []),
+        ...(tabs?.viirs?.past_fire_events || []),
+      ];
+      const matchedViirs = viirsPool.find(
+        (ev) => String(ev.fire?.fire_final) === String(selectedRawEvent.viirs_fire_final),
+      );
+      if (matchedViirs?.fire) return matchedViirs;
+    }
+    return selectedRawEvent;
+  }, [selectedRawEvent, activeTab, tabs]);
+
   const needsModelFetch = Boolean(
     country?.status === "ready" &&
+    targetModelEvent?.fire &&
     selectedRawEvent?.fire &&
     hasViirsSupport &&
     (!selectedRawEvent.hazard ||
@@ -408,7 +424,9 @@ function Hero() {
   );
 
   useEffect(() => {
-    if (!needsModelFetch || !selectedRawEvent?.fire || !selectedCacheKey) return;
+    if (!needsModelFetch || !targetModelEvent?.fire || !selectedRawEvent?.fire || !selectedCacheKey) {
+      return;
+    }
 
     const controller = new AbortController();
     fetch("/api/fire-models", {
@@ -417,16 +435,16 @@ function Hero() {
       signal: controller.signal,
       body: JSON.stringify({
         fire_event: {
-          fire: selectedRawEvent.fire,
-          detections: selectedRawEvent.detections,
-          is_past: selectedRawEvent.is_past,
-          hindcast: selectedRawEvent.hindcast?.earlyFireEvent
-            ? { earlyFireEvent: selectedRawEvent.hindcast.earlyFireEvent }
+          fire: targetModelEvent.fire,
+          detections: targetModelEvent.detections,
+          is_past: targetModelEvent.is_past ?? selectedRawEvent.is_past,
+          hindcast: targetModelEvent.hindcast?.earlyFireEvent
+            ? { earlyFireEvent: targetModelEvent.hindcast.earlyFireEvent }
             : undefined,
         },
         include_hazard: !selectedRawEvent.hazard,
         include_prediction: !selectedRawEvent.prediction || !selectedPredictionFeatures.length,
-        use_hindcast_snapshot: Boolean(selectedRawEvent.is_past),
+        use_hindcast_snapshot: Boolean(targetModelEvent.is_past ?? selectedRawEvent.is_past),
       }),
     })
       .then((res) => (res.ok ? res.json() : null))
@@ -457,7 +475,13 @@ function Hero() {
       });
 
     return () => controller.abort();
-  }, [needsModelFetch, selectedRawEvent, selectedCacheKey, selectedPredictionFeatures.length]);
+  }, [
+    needsModelFetch,
+    targetModelEvent,
+    selectedRawEvent,
+    selectedCacheKey,
+    selectedPredictionFeatures.length,
+  ]);
 
   const filteredOverlayGeo = useMemo(() => {
     if (!activeTabData) return { trackedGeoJson: null, predictionsGeoJson: null };

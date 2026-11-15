@@ -18,15 +18,6 @@ const pct = (val) =>
 const num = (val, digits = 2) =>
   typeof val === "number" && Number.isFinite(val) ? val.toFixed(digits) : "—";
 
-function model3EnvelopeByFireType(fireType) {
-  const t = String(fireType || "").toLowerCase();
-  if (t === "crop") return { p10: 1.13, median: 1.27, p90: 1.69 };
-  if (t === "forest" || t === "shrub_grass" || t === "wildland") {
-    return { p10: 1.13, median: 1.55, p90: 2.81 };
-  }
-  return { p10: 1.13, median: 1.41, p90: 2.44 };
-}
-
 export default function OnMapFireHud({
   activeTab = "combined",
   sortedEvents = [],
@@ -98,39 +89,53 @@ export default function OnMapFireHud({
   const hazard = selectedFireEvent?.hazard || null;
   const prediction = selectedFireEvent?.prediction || null;
   const hindcast = selectedFireEvent?.hindcast || null;
+  const hasViirsSupport = Boolean(
+    f &&
+      activeTab !== "modis" &&
+      (prediction ||
+        hazard ||
+        (f.satellites || []).some((s) => String(s).toUpperCase().includes("VIIRS")) ||
+        (selectedFireEvent?.detections || []).some((d) => {
+          const inst = String(
+            d?.instrument || d?.satellite_id || d?.sat || d?.satellite || "",
+          ).toUpperCase();
+          return (
+            inst.includes("VIIRS") ||
+            inst === "N" ||
+            inst === "N20" ||
+            inst === "N21" ||
+            d?._sensor === 1
+          );
+        })),
+  );
   const isPastFire = Boolean(selectedFireEvent?.is_past);
   const showActualVsPredicted =
     isPastFire ||
     (Boolean(hindcast?.isMultiPass) &&
       Number(hindcast?.actualFinalAreaKm2) > Number(hindcast?.initialAreaKm2));
 
-  const currentArea = f
-    ? Math.max(Number(prediction?.current_area_km2 ?? f.area_km2) || 0.18, 0.14)
-    : 0;
-  const m3 = model3EnvelopeByFireType(f?.fire_type);
-  const hasExpansionArea = Number(prediction?.predicted_total_area_km2) > currentArea + 0.05;
-  const projectedArea = f
-    ? hasExpansionArea
-      ? Number(prediction.predicted_total_area_km2)
-      : Number((currentArea + m3.median).toFixed(2))
-    : 0;
-  const outerBoundArea = f
-    ? Number((currentArea + (prediction?.additional_area_p90_km2 ?? m3.p90)).toFixed(2))
-    : 0;
+  const currentArea = f ? Number(prediction?.current_area_km2 ?? f.area_km2 ?? 0) : 0;
   const initialArea = f
-    ? Math.max(
-        Number(hindcast?.initialAreaKm2 ?? prediction?.current_area_km2 ?? f.area_km2) || 0.18,
-        0.14
-      )
+    ? Number(hindcast?.initialAreaKm2 ?? prediction?.current_area_km2 ?? f.area_km2 ?? 0)
     : 0;
   const actualArea = f
-    ? Math.max(Number(hindcast?.actualFinalAreaKm2 ?? f.area_km2) || initialArea, initialArea)
+    ? Number(hindcast?.actualFinalAreaKm2 ?? f.area_km2 ?? initialArea)
     : 0;
-  const predictedArea = f
-    ? prediction?.predicted_total_area_km2 != null
+  const predictedArea =
+    prediction?.predicted_total_area_km2 != null
       ? Number(prediction.predicted_total_area_km2)
-      : projectedArea
-    : 0;
+      : null;
+  const predictedAddArea =
+    prediction?.predicted_additional_area_km2 != null
+      ? Number(prediction.predicted_additional_area_km2)
+      : null;
+  const hasOuterBound =
+    prediction?.additional_area_p90_km2 !== null &&
+    prediction?.additional_area_p90_km2 !== undefined &&
+    Number.isFinite(Number(prediction.additional_area_p90_km2));
+  const outerBoundArea = hasOuterBound
+    ? Number((currentArea + Number(prediction.additional_area_p90_km2)).toFixed(4))
+    : null;
 
   return (
     <>
@@ -253,7 +258,13 @@ export default function OnMapFireHud({
             <div className="map-spread-head">
               <div>
                 <span className="map-spread-eyebrow">
-                  {isPastFire ? "PAST FIRE · ACTUAL VS. PREDICTED SPREAD" : "ON-MAP SPREAD & HAZARD"}
+                  {!hasViirsSupport
+                    ? isPastFire
+                      ? "PAST MODIS FIRE · OBSERVED SPREAD"
+                      : "ON-MAP MODIS TRACKER SPREAD"
+                    : isPastFire
+                      ? "PAST FIRE · ACTUAL VS. PREDICTED SPREAD"
+                      : "ON-MAP SPREAD & HAZARD"}
                 </span>
                 <h3 className="map-spread-title">
                   Fire #{f.fire_final} ·{" "}
@@ -268,11 +279,11 @@ export default function OnMapFireHud({
                 <span className={`hazard-pill map-hazard-badge ${getRatingClass(hazard.hazard_rating)}`}>
                   {hazard.hazard_score}/100 · {hazard.hazard_rating.toUpperCase()}
                 </span>
-              ) : isLoadingModels ? (
+              ) : isLoadingModels && hasViirsSupport ? (
                 <span className="hazard-pill hazard-unknown map-hazard-badge">SCORING…</span>
               ) : (
                 <span className="hazard-pill hazard-unknown map-hazard-badge">
-                  {activeTab === "modis" ? "MODIS ONLY" : "NO VIIRS SCORE"}
+                  {!hasViirsSupport ? "MODIS ONLY" : "NO VIIRS SCORE"}
                 </span>
               )}
             </div>
@@ -326,62 +337,142 @@ export default function OnMapFireHud({
               </div>
             ) : (
               <p className="map-top-drivers">
-                {isLoadingModels
-                  ? "Fetching Python backend hazard rating & spread predictions…"
-                  : activeTab === "modis"
-                    ? "Switch to VIIRS · ML or select a VIIRS-backed fire for calibrated hazard scores."
+                {!hasViirsSupport
+                  ? "MODIS-only fire: switch to VIIRS · ML or select a VIIRS-backed fire for hazard scores & spread forecasts."
+                  : isLoadingModels
+                    ? "Fetching Python backend hazard rating & spread predictions…"
                     : "Calibrated hazard score unavailable for this event location."}
               </p>
             )}
 
             <div className="map-spread-metrics">
-              {showActualVsPredicted ? (
-                <>
-                  <div className="map-metric-cell map-metric-actual">
-                    <span>ACTUAL SPREAD</span>
-                    <strong>{num(actualArea, 2)} km²</strong>
-                  </div>
-                  <div className="map-metric-cell map-metric-pred">
-                    <span>MODEL PREDICTED</span>
-                    <strong>
-                      {prediction ? `${num(predictedArea, 2)} km²` : isLoadingModels ? "Scoring…" : "—"}
-                    </strong>
-                  </div>
-                  <div className="map-metric-cell">
-                    <span>INITIAL PASS (T0)</span>
-                    <strong>{num(initialArea, 2)} km²</strong>
-                  </div>
-                </>
+              {!hasViirsSupport ? (
+                showActualVsPredicted ? (
+                  <>
+                    <div className="map-metric-cell map-metric-actual">
+                      <span>ACTUAL SPREAD</span>
+                      <strong>{num(actualArea, 2)} km²</strong>
+                    </div>
+                    <div className="map-metric-cell">
+                      <span>INITIAL PASS (T0)</span>
+                      <strong>{num(initialArea, 2)} km²</strong>
+                    </div>
+                    <div className="map-metric-cell">
+                      <span>DURATION</span>
+                      <strong>{num(f.duration_h, 0)} h</strong>
+                    </div>
+                    <div className="map-metric-cell">
+                      <span>SENSOR</span>
+                      <strong>MODIS 1 km</strong>
+                    </div>
+                    <div className="map-metric-cell">
+                      <span>ML FORECAST</span>
+                      <strong>VIIRS Only</strong>
+                    </div>
+                    <div className="map-metric-cell">
+                      <span>OBSERVATIONS</span>
+                      <strong>
+                        {f.n_det} det · {f.n_passes}p · {num(f.frp_sum, 1)} MW
+                      </strong>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="map-metric-cell">
+                      <span>DETECTED AREA</span>
+                      <strong>{num(currentArea, 2)} km²</strong>
+                    </div>
+                    <div className="map-metric-cell">
+                      <span>TOTAL FRP</span>
+                      <strong>{num(f.frp_sum, 1)} MW</strong>
+                    </div>
+                    <div className="map-metric-cell">
+                      <span>DURATION</span>
+                      <strong>{num(f.duration_h, 0)} h</strong>
+                    </div>
+                    <div className="map-metric-cell">
+                      <span>SENSOR</span>
+                      <strong>MODIS 1 km</strong>
+                    </div>
+                    <div className="map-metric-cell">
+                      <span>ML FORECAST</span>
+                      <strong>VIIRS Only</strong>
+                    </div>
+                    <div className="map-metric-cell">
+                      <span>OBSERVATIONS</span>
+                      <strong>
+                        {f.n_det} det · {f.n_passes}p
+                      </strong>
+                    </div>
+                  </>
+                )
               ) : (
                 <>
+                  {showActualVsPredicted ? (
+                    <>
+                      <div className="map-metric-cell map-metric-actual">
+                        <span>ACTUAL SPREAD</span>
+                        <strong>{num(actualArea, 2)} km²</strong>
+                      </div>
+                      <div className="map-metric-cell map-metric-pred">
+                        <span>MODEL PREDICTED</span>
+                        <strong>
+                          {predictedArea !== null
+                            ? `${num(predictedArea, 2)} km²`
+                            : isLoadingModels
+                              ? "Scoring…"
+                              : "—"}
+                        </strong>
+                      </div>
+                      <div className="map-metric-cell">
+                        <span>INITIAL PASS (T0)</span>
+                        <strong>{num(initialArea, 2)} km²</strong>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="map-metric-cell">
+                        <span>CURRENT SPREAD</span>
+                        <strong>{num(currentArea, 2)} km²</strong>
+                      </div>
+                      <div className="map-metric-cell">
+                        <span>PREDICTED TOTAL</span>
+                        <strong>
+                          {predictedArea !== null
+                            ? `${num(predictedArea, 2)} km²`
+                            : isLoadingModels
+                              ? "Scoring…"
+                              : "—"}
+                        </strong>
+                      </div>
+                      <div className="map-metric-cell">
+                        <span>{hasOuterBound ? "90% SPREAD BOUND" : "PREDICTED ADD AREA"}</span>
+                        <strong>
+                          {hasOuterBound
+                            ? `${num(outerBoundArea, 2)} km²`
+                            : predictedAddArea !== null
+                              ? `+${num(predictedAddArea, 2)} km²`
+                              : "—"}
+                        </strong>
+                      </div>
+                    </>
+                  )}
                   <div className="map-metric-cell">
-                    <span>CURRENT SPREAD</span>
-                    <strong>{num(currentArea, 2)} km²</strong>
+                    <span>PERSIST (12–24H)</span>
+                    <strong>{pct(prediction?.persistence_probability)}</strong>
                   </div>
                   <div className="map-metric-cell">
-                    <span>{hasExpansionArea ? "PREDICTED TOTAL" : "MODEL-3 ENVELOPE"}</span>
-                    <strong>{num(projectedArea, 2)} km²</strong>
+                    <span>EXPANSION PROB</span>
+                    <strong>{pct(prediction?.expansion_probability)}</strong>
                   </div>
                   <div className="map-metric-cell">
-                    <span>90% SPREAD BOUND</span>
-                    <strong>{num(outerBoundArea, 2)} km²</strong>
+                    <span>OBSERVATIONS</span>
+                    <strong>
+                      {f.n_det} det · {f.n_passes}p · {num(f.frp_sum, 1)} MW
+                    </strong>
                   </div>
                 </>
               )}
-              <div className="map-metric-cell">
-                <span>PERSIST (12–24H)</span>
-                <strong>{pct(prediction?.persistence_probability)}</strong>
-              </div>
-              <div className="map-metric-cell">
-                <span>EXPANSION PROB</span>
-                <strong>{pct(prediction?.expansion_probability)}</strong>
-              </div>
-              <div className="map-metric-cell">
-                <span>OBSERVATIONS</span>
-                <strong>
-                  {f.n_det} det · {f.n_passes}p · {num(f.frp_sum, 1)} MW
-                </strong>
-              </div>
             </div>
 
             {selectedFireEvent?.context && (
@@ -411,19 +502,23 @@ export default function OnMapFireHud({
                   <i className="ring-swatch ring-actual" /> Actual Spread
                 </span>
               )}
-              <span>
-                <i
-                  className={`ring-swatch ${
-                    prediction?.prediction_status === "expansion_likely"
-                      ? "ring-predicted-exp"
-                      : "ring-predicted"
-                  }`}
-                />{" "}
-                {showActualVsPredicted ? "Predicted Spread" : "12–24h Spread"}
-              </span>
-              <span>
-                <i className="ring-swatch ring-outer" /> 90% Bound
-              </span>
+              {hasViirsSupport && predictedArea !== null && (
+                <span>
+                  <i
+                    className={`ring-swatch ${
+                      prediction?.prediction_status === "expansion_likely"
+                        ? "ring-predicted-exp"
+                        : "ring-predicted"
+                    }`}
+                  />{" "}
+                  {showActualVsPredicted ? "Predicted Spread" : "12–24h Spread"}
+                </span>
+              )}
+              {hasViirsSupport && hasOuterBound && (
+                <span>
+                  <i className="ring-swatch ring-outer" /> 90% Bound
+                </span>
+              )}
               <span>
                 <i className="ring-swatch ring-trail" /> Pass Trail
               </span>
